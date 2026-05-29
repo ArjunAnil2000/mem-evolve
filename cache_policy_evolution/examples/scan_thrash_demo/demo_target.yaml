@@ -1,0 +1,48 @@
+# Scan-thrash demo target config
+# Worst-case workload for Linux page cache — designed to punish LRU.
+#
+# Score = hot_read_time / hot_read_after_scan_time (higher = better)
+#   ~1.0 = hot data stayed cached (good policy)
+#   <0.3 = hot data evicted by scan (LRU behavior)
+#
+# Usage:
+#   sudo bash examples/scan_thrash_demo/run_benchmark.sh
+#   CACHE_EXT_TARGET_CONFIG=examples/scan_thrash_demo/demo_target.yaml \
+#     python3 run_evolution.py --iterations 1 -v
+
+name: scan_thrash_demo
+
+source_dir: "../../../cache_ext"
+build_dir: "."
+output_binary: "dummy"
+
+compilation:
+  compiler: "clang-14"
+  build_command: "make"
+  build_target: "dummy"
+  build_timeout: 30
+  syntax_timeout: 10
+
+benchmarks:
+  - name: scan_thrash
+    launch_script: "eval/scan_thrash/run.sh"
+    results_file: "examples/scan_thrash_demo/results.json"
+    timeout: 600
+    weight: 1.0
+    iterations: 1
+    iteration_aggregation: avg
+    baseline_values:
+      throughput: 0.3
+    hooks:
+      - type: throughput
+        weight: 1.0
+        json_path: "combined_score"
+        unit: "ratio"
+
+workers:
+  - url: "http://clstore03.clemson.cloudlab.us:8080"
+  - url: "http://clnode004.clemson.cloudlab.us:8080"
+
+prompt: |
+  This is a scan-thrash demo target. Optimize cache eviction to protect
+  hot data from sequential scan pollution.

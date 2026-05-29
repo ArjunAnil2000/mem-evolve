@@ -1,0 +1,28 @@
+# Environments / build dirs
+venv/
+.env
+__pycache__/
+*.pyc
+
+# Benchmark data / scratch
+cgroup/
+fio_dir/
+leveldb*/
+linux/
+twitter-traces/
+
+# Evolution run artifacts
+runs/
+*.out
+*.log
+results_baseline.json
+**/comparison_results/
+examples/**/results.json
+
+# Generated visualizations
+evo_with_*.html
+evo_with_*.json
+evolution_analyzer/evolution_tree.html
+
+# Local agent config
+.claude/

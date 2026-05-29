@@ -1,0 +1,81 @@
+# Evolution config — Twitter trace replay over LevelDB.
+# Usage:
+#   ./start_workers.sh --install-bench h1 h2 h3   # one-shot worker setup
+#   python3 evolve.py twitter_leveldb.toml
+#
+# Workers must have:
+#   1. The DB bench stack installed (`--install-bench` above).
+#   2. Twitter trace files at /mydata/twitter-traces/cluster17_{init,bench}.txt
+#      (or override TWITTER_TRACES_DIR / TWITTER_CLUSTER).
+
+source_dir    = "../cache_ext"
+benchmark     = "eval/twitter_leveldb/run_with_policy.sh"
+output_dir    = "runs/twitter_leveldb"
+seeds_dir     = "seeds"
+mutator_prompt = "evolution/prompts/mutator.txt"
+
+rounds     = 20
+timeout    = 240
+resume     = false
+tree_file  = "evolution_tree.json"
+
+auto_calibrate     = true
+calibrate_baseline = "noop"   # vanilla Linux reference; stats freeze after calibration
+calibrate_runs     = 8        # bump for stable σ on a single regime
+
+workload_description = """
+Twitter Memcached production trace (cluster 17 from Yang et al. OSDI '20)
+replayed over LevelDB. Real Zipfian + temporal locality: a small minority
+of keys account for most reads, a 50/50 read/update mix, bursty access
+patterns that synthetic generators don't capture.
+
+The benchmark phase replays cluster17_bench.txt for 30s under a tight
+cgroup memory limit (~96 MB, ~25% of working set).
+
+Primary goal: maximize total throughput (ops/sec) — equivalently minimize
+bytes read from disk and minor faults. Secondary: minimize READ p99
+latency (tail latency reveals when the policy lets the hot tail evict).
+
+Adversaries to defeat:
+  * The trace's long cold tail (one-shot keys) trying to displace the hot
+    set — the realistic counterpart of scan_thrash.
+  * Bursty re-access of medium-frequency keys: pure LRU keeps them, pure
+    MRU drops them; the right answer is somewhere in between.
+"""
+
+# Empty = run locally. Fill in one URL per worker daemon, e.g.:
+# workers = ["http://host1:8080", "http://host2:8080", "http://host3:8080"]
+workers = []
+
+[http_worker]
+cgroup = "/sys/fs/cgroup/cache_ext_evo_bench"
+
+[llm.mutator]
+model       = "claude-sonnet-4-6"
+provider    = "openai"
+api_base    = "http://localhost:8082/v1"
+api_key_env = "OPENAI_API_KEY"
+temperature = 0.85
+
+[llm.planner]
+model       = "claude-opus-4-7"
+provider    = "openai"
+api_base    = "http://localhost:8082/v1"
+api_key_env = "OPENAI_API_KEY"
+temperature = 0.5
+
+[scoring]
+squash                  = "tanh"
+min_n                   = 2
+update_during_evolution = false   # true = original "evolving z-score" mode
+
+[scoring.weights]
+cgroup_iostat   = 1.0
+cgroup_memstat  = 0.5
+wallclock       = 0.25
+
+[evolution]
+checkpoint_interval     = 5
+top_k_for_checkpoint    = 10
+max_spawn               = 2
+checkpoint_temperature  = 0.5

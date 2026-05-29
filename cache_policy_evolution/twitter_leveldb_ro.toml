@@ -1,0 +1,134 @@
+# Evolution config — Twitter trace replay over LevelDB, READ-ONLY variant.
+#
+# Purpose: surface page-cache policy quality cleanly by removing the four
+# things that masked it in twitter_leveldb.toml:
+#   1. Writes — uses a get-only filtered trace (yaml's read/update fractions
+#      are IGNORED for twitter_bench; op type comes from the trace file).
+#   2. LevelDB block cache — disabled via 1-byte LRU (cache_size=0 in YAML
+#      requires the My-YCSB patch to take effect; default LevelDB behavior
+#      is to silently auto-create an 8 MiB cache when block_cache is null).
+#   3. Cold-start dilution — 10s warmup before 60s measurement.
+#   4. Short measurement window — 60s vs 30s.
+#
+# REQUIRED ONE-SHOT WORKER SETUP (in addition to --install-bench):
+#   The per-workload My-YCSB patch + trace filter + compact_leveldb build
+#   live at eval/twitter_leveldb_ro/setup.sh. Drive remotely via:
+#     python3 evolve.py twitter_leveldb_ro.toml --setup-workers
+#   Idempotent — re-run after pulling repo changes.
+#
+# Usage:
+#   ./start_workers.sh --install-bench --download-dbs h1 h2 h3   # shared base
+#   python3 evolve.py twitter_leveldb_ro.toml --setup-workers    # workload setup
+#   python3 evolve.py twitter_leveldb_ro.toml --preflight        # readiness check
+#   python3 evolve.py twitter_leveldb_ro.toml                    # auto-preflights, then evolves
+
+source_dir    = "../cache_ext"
+benchmark     = "eval/twitter_leveldb_ro/run_with_policy.sh"
+output_dir    = "runs/twitter_leveldb_ro"
+seeds_dir     = "seeds"
+mutator_prompt = "evolution/prompts/mutator.txt"
+
+rounds     = 8
+timeout    = 300
+resume     = false
+tree_file  = "evolution_tree.json"
+
+# Run the launcher twice per evaluation: once with EVO_PHASE=warmup (DB
+# init, drop_caches, swapoff, cgroup setup, loader start, 10s of trace
+# replay to populate the page cache) and once with EVO_PHASE=measure (the
+# 60s window we actually care about). Probes wrap ONLY the measure phase,
+# so iostat/memstat/wallclock no longer absorb init or cold-start noise.
+# The evaluator owns loader teardown across phases via $JOB_DIR/loader.pid.
+benchmark_split = true
+warmup_timeout  = 180
+
+auto_calibrate     = true
+calibrate_baseline = "noop"
+calibrate_runs     = 8
+
+workload_description = """
+Twitter Memcached production trace (cluster 17 from Yang et al. OSDI '20)
+replayed over LevelDB, read-only. Real Zipfian + temporal locality with no
+update traffic to dilute page-cache signal. LevelDB's own block cache is
+disabled, so the kernel page cache sees the trace's full access stream
+(rather than just the residual after LevelDB's L1 cache absorbs the hottest
+blocks).
+
+The benchmark runs 10s of warmup then 60s of measurement under a tight
+cgroup memory limit (~96 MB, ~15-20% of working set). drop_caches is run
+before each evaluation so every policy starts from an identical empty
+cache; warmup repopulates it under the same access pattern.
+
+Primary goal: maximize total throughput (ops/sec) — equivalently minimize
+bytes read from disk and refaults. Secondary: minimize READ p99 latency
+(tail latency reveals when the policy lets the hot tail evict).
+
+Adversaries to defeat:
+  * The trace's long cold tail (one-shot keys) trying to displace the hot
+    set — the realistic counterpart of scan_thrash.
+  * Bursty re-access of medium-frequency keys: pure LRU keeps them, pure
+    MRU drops them; the right answer is somewhere in between.
+"""
+
+# Empty = run locally. Fill in one URL per worker daemon, e.g.:
+# workers = ["http://host1:8080", "http://host2:8080", "http://host3:8080"]
+workers = []
+
+[http_worker]
+cgroup = "/sys/fs/cgroup/cache_ext_evo_bench"
+
+[llm.mutator]
+model       = "claude-sonnet-4-6"
+provider    = "openai"
+api_base    = "http://localhost:8082/v1"
+api_key_env = "OPENAI_API_KEY"
+temperature = 0.85
+
+[llm.planner]
+model       = "claude-opus-4-7"
+provider    = "openai"
+api_base    = "http://localhost:8082/v1"
+api_key_env = "OPENAI_API_KEY"
+temperature = 0.5
+
+# Workload-specific probes — pulled out of $JOB_DIR/results.json by the
+# launch script. direction="record" tracks them on every tree node without
+# touching the score (move them into [scoring.weights] if you want them
+# scored). Unknown probe names in weights are ignored, so adding probes here
+# is safe.
+[[probes]]
+type         = "json_extract"
+name         = "throughput"
+results_file = "results.json"
+json_path    = "throughput_ops_per_sec"
+direction    = "maximize"
+unit         = "ops/s"
+
+# read_p99_latency / read_avg_latency removed: My-YCSB's measurement.cpp
+# leaves final_latency_vec empty (race between worker finish_measure and
+# the monitor's lock acquire), so every value is a structural 0.00. Fixing
+# requires a C++ change + rebuild on every worker. Wallclock already
+# captures end-to-end timing for now.
+
+[scoring]
+squash                  = "tanh"
+min_n                   = 2
+update_during_evolution = false
+
+[scoring.weights]
+# Throughput is the ground-truth signal for fixed-time benchmarks: same
+# wallclock, more ops = better policy. iostat/memstat are tightly
+# correlated with throughput (same ~3.4% CV across workers — they're
+# all measuring the same underlying cache effectiveness), so they're
+# kept at low weight only as tie-breakers when throughput is close.
+# wallclock is intentionally absent: BENCH_WARMUP+BENCH_RUNTIME pin it
+# to ~70s every run (CV ~0.3%), so it contributes pure noise.
+throughput     = 1.0
+cgroup_iostat  = 0.1
+
+[evolution]
+num_branches            = 4
+checkpoint_interval     = 5
+top_k_for_checkpoint    = 10
+max_spawn               = 2
+checkpoint_temperature  = 0.5

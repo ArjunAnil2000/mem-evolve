@@ -1,0 +1,87 @@
+# Evolution config — YCSB-C lite on RocksDB (zipfian reads, small DB).
+#
+# Workload: 100% zipfian-skewed reads against a ~210MB RocksDB under a tight
+# memory cgroup (96MB by default). The hot-key set fits in cache; a smart
+# eviction policy should keep it resident and tank the long-tail latency of
+# fetches from disk.
+#
+# Usage:
+#   # one-time: build My-YCSB
+#   cd ../cache_ext/My-YCSB && cmake -B build && \
+#       cmake --build build --target init_rocksdb run_rocksdb -j
+#
+#   # one-time: seed normalization stats (5 runs of each seed, no LLM)
+#   python3 evolve.py ycsb_rocksdb_lite.toml --calibrate 5
+#
+#   # full run
+#   python3 evolve.py ycsb_rocksdb_lite.toml --rounds 30
+
+source_dir    = "../cache_ext"
+benchmark     = "eval/ycsb_rocksdb_lite/run_with_policy.sh"
+output_dir    = "runs/ycsb_rocksdb_lite"
+seeds_dir     = "seeds"
+mutator_prompt = "evolution/prompts/mutator.txt"
+
+rounds     = 20
+timeout    = 240          # the bench itself is ~30s + first-time DB init
+resume     = false
+tree_file  = "evolution_tree.json"
+
+workload_description = """
+YCSB-C zipfian read workload on a ~210MB RocksDB under a 96MB memory cgroup.
+1M keys, 200B values, 4 threads, zipfian_constant=0.99 (heavy skew). Small
+hot-key working set + long tail of cold keys: a good policy detects the hot
+set quickly and refuses to let cold scans evict it. Primary metric:
+throughput (ops/sec); secondaries: cgroup rbytes (lower=better, less disk
+fetch) and refault count.
+"""
+
+workers = []   # local-only by default; add HTTPWorker URLs to parallelize
+
+[http_worker]
+cgroup = "/sys/fs/cgroup/cache_ext_evo_bench"
+
+[llm.mutator]
+model       = "claude-sonnet-4-6"
+provider    = "openai"
+api_base    = "http://localhost:8082/v1"
+api_key_env = "OPENAI_API_KEY"
+temperature = 0.85
+
+[llm.planner]
+model       = "claude-opus-4-7"
+provider    = "openai"
+api_base    = "http://localhost:8082/v1"
+api_key_env = "OPENAI_API_KEY"
+temperature = 0.5
+
+[scoring]
+squash = "tanh"
+min_n  = 2
+
+# Throughput is the headline metric — give it the largest weight. The
+# kernel-level probes (rbytes, refaults, wallclock) are secondary signals
+# that often agree with throughput but catch cases where the policy looks
+# fast for the wrong reason.
+[scoring.weights]
+ycsb_throughput = 2.0
+cgroup_iostat   = 1.0
+cgroup_memstat  = 0.5
+wallclock       = 0.25
+
+# Custom probe: reads results.json that the launch script writes to JOB_DIR.
+# `direction = "maximize"` means higher value → better score (z-score is
+# flipped accordingly during normalization).
+[[probes]]
+type         = "json_extract"
+name         = "ycsb_throughput"
+results_file = "results.json"
+json_path    = "throughput_ops_per_sec"
+direction    = "maximize"
+unit         = "ops/s"
+
+[evolution]
+checkpoint_interval     = 5
+top_k_for_checkpoint    = 10
+max_spawn               = 2
+checkpoint_temperature  = 0.5

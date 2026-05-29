@@ -1,0 +1,15 @@
+# LLM SDKs (coordinator uses Anthropic via llm_adapter.py; openai kept for compat)
+anthropic
+openai
+
+# YAML parsing (used by targets.base and related configs)
+pyyaml
+
+# HTTP client — coordinator talks to worker_server.py over HTTP
+requests
+
+# TOML parser only needed on Python < 3.11 (for evolve.py config loading)
+tomli; python_version < "3.11"
+
+# Progress bars for parallel worker rounds.
+tqdm

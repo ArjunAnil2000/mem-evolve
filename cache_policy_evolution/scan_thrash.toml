@@ -1,0 +1,109 @@
+# Evolution config — scan-thrash workload
+# Usage:
+#   python3 evolve.py scan_thrash.toml
+#   python3 evolve.py scan_thrash.toml --rounds 30 --resume
+
+source_dir    = "../cache_ext"
+benchmark     = "eval/scan_thrash/run_with_policy.sh"
+output_dir    = "runs/scan_thrash"
+seeds_dir     = "seeds"
+mutator_prompt = "evolution/prompts/mutator.txt"
+
+rounds     = 20
+timeout    = 180          # per-evaluation bash timeout, seconds
+resume     = false
+tree_file  = "evolution_tree.json"
+
+# Auto-calibration: every run starts by executing the baseline `calibrate_runs`
+# times to seed normalization stats AND smoke-test the workload. If the
+# baseline crashes during calibration, evolution aborts before burning LLM
+# calls. Override with `--calibrate-runs N` or skip with `--no-calibrate`.
+#
+# `calibrate_baseline` pins the reference to a single seed (typically `noop`
+# = vanilla Linux, no struct_ops attached). Stats are then frozen for the rest
+# of the run, so scores mean "this many baseline-noise σ better than vanilla."
+# Bump runs to 5–10 so σ is stable on a single regime. Unset this knob to fall
+# back to multi-seed calibration.
+auto_calibrate     = true
+calibrate_baseline = "noop"
+calibrate_runs     = 8
+
+# ---------------------------------------------------------------------------
+# Workload description — fed to the planner LLM at startup. Should describe
+# access pattern, working-set size, cache budget, and what "winning" means.
+# ---------------------------------------------------------------------------
+workload_description = """
+Ripgrep-style scan over a ~3 GiB working set with a 1 GiB page-cache budget.
+Traffic mix: mostly sequential reads of many files, interleaved with
+recurring accesses to a smaller hot set of files that fits in cache. A bad
+policy lets the scan evict the hot set (scan-thrash); a good one keeps hot
+files resident and treats bulk scan pages as transient.
+Primary goal: minimise bytes read from disk (cgroup io.stat rbytes).
+Secondary: minimise workingset_refault_file and wallclock.
+"""
+
+# ---------------------------------------------------------------------------
+# Workers. Empty list = run evaluate() locally on this machine (1 branch).
+# Non-empty = one HTTPWorker per URL. Launch the daemons via:
+#     ./start_workers.sh host1 host2 host3
+# ---------------------------------------------------------------------------
+# Empty = run locally. Fill in one URL per worker daemon, e.g.:
+# workers = ["http://host1:8080", "http://host2:8080", "http://host3:8080"]
+workers = []
+
+[http_worker]
+# Defaults applied to every HTTPWorker. The benchmark script honours
+# $CACHE_EXT_CGROUP and creates the cgroup on the worker if it doesn't
+# exist, so pick a name run_with_policy.sh is happy to create.
+cgroup = "/sys/fs/cgroup/cache_ext_evo_bench"
+# cwd    = "/home/ddesai/evo_cache/cache_ext"   # script cwd on the worker
+# auth_token = "<shared-secret>"                # must match worker's EVO_WORKER_TOKEN
+
+# ---------------------------------------------------------------------------
+# LLM tiers: mutator is cheap + fast (called every round × branch); planner
+# is strong + used for seed selection and frontier reviews.
+# ---------------------------------------------------------------------------
+[llm.mutator]
+model       = "claude-sonnet-4-6"
+provider    = "openai"
+api_base    = "http://localhost:8082/v1"
+api_key_env = "OPENAI_API_KEY"
+temperature = 0.85
+
+[llm.planner]
+model       = "claude-opus-4-7"
+provider    = "openai"
+api_base    = "http://localhost:8082/v1"
+api_key_env = "OPENAI_API_KEY"
+temperature = 0.5
+
+# ---------------------------------------------------------------------------
+# Scoring. Each probe is z-normalized against a running mean / stddev
+# maintained across the run (Welford), squashed through tanh so no single
+# outlier can dominate, then weighted-summed. Persisted state lives at
+# `<output_dir>/normalization.json` — `--resume` and `--calibrate` reuse it.
+#
+# Use `evolve.py <cfg> --calibrate N` once per machine/workload to seed the
+# stats by running the seed policies N times with no LLM in the loop.
+# ---------------------------------------------------------------------------
+[scoring]
+squash                  = "tanh"   # "tanh" | "none"
+min_n                   = 2        # samples needed before a probe contributes
+update_during_evolution = false    # true = original "evolving z-score" mode
+                                   # false (default) = freeze stats after
+                                   # calibration so scores stay comparable
+
+[scoring.weights]
+cgroup_iostat   = 1.0
+cgroup_memstat  = 0.5
+wallclock       = 0.5
+
+# ---------------------------------------------------------------------------
+# Evolution knobs.
+# ---------------------------------------------------------------------------
+[evolution]
+# num_branches = 4                  # default: len(workers) or 1
+checkpoint_interval     = 5          # frontier review cadence (rounds)
+top_k_for_checkpoint    = 10
+max_spawn               = 2
+checkpoint_temperature  = 0.5

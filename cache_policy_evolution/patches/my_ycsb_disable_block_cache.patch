@@ -1,0 +1,51 @@
+# Patch: honor leveldb.cache_size from the YAML in My-YCSB.
+#
+# Problem:
+#   My-YCSB's LevelDBFactory ignores the cache_size YAML field — it opens
+#   LevelDB with a default-constructed Options. LevelDB defaults
+#   options.block_cache to nullptr, but db_impl.cc:115-116 SanitizeOptions
+#   then auto-creates an 8 MiB internal LRU cache. So every run silently
+#   gets an 8 MiB block cache that absorbs the hottest reads before the
+#   page cache ever sees them.
+#
+# Fix:
+#   Honor cache_size from the YAML. cache_size <= 0 => 1-byte LRU cache
+#   (effectively disabled — LevelDB has nowhere to put blocks). Otherwise
+#   NewLRUCache(cache_size).
+#
+# Apply with:
+#   bash cache_policy_evolution/scripts/setup_workload_ro.sh
+# (idempotent — checks for the EVO_CACHE_RO_PATCH marker before applying).
+#
+# Target file: cache_ext/My-YCSB/leveldb/leveldb_client.cpp
+# Apply from:  cache_ext/My-YCSB/   (i.e. patch -p1)
+
+--- a/leveldb/leveldb_client.cpp
++++ b/leveldb/leveldb_client.cpp
+@@ -7,6 +7,7 @@
+ #include "leveldb/db.h"
+ #include "leveldb/options.h"
+ #include "leveldb/status.h"
++#include "leveldb/cache.h"  // EVO_CACHE_RO_PATCH
+ 
+ #include "leveldb_client.h"
+ 
+@@ -195,7 +196,17 @@ LevelDBFactory::LevelDBFactory(std::string data_dir, std::string options_file,
+ 	leveldb::Options options;
+ 
+ 	// options.write_buffer_size = 1024 * 1024 * 256;
+-
++	// EVO_CACHE_RO_PATCH: honor cache_size from YAML (was previously ignored).
++	// LevelDB defaults block_cache=nullptr but db_impl.cc:SanitizeOptions
++	// auto-creates an 8 MiB cache when null. To actually disable the block
++	// cache (so the page cache sees the real Zipfian access stream), we set
++	// a 1-byte LRU cache when cache_size <= 0 — LevelDB has nowhere to put
++	// blocks, so every block read goes to the file system / page cache.
++	if (cache_size <= 0) {
++		options.block_cache = leveldb::NewLRUCache(1);
++	} else {
++		options.block_cache = leveldb::NewLRUCache(cache_size);
++	}
+ 	options.create_if_missing = true;
+ 	status = leveldb::DB::Open(options, data_dir, &db);
+ 

@@ -1,0 +1,57 @@
+# Demo target config for the filesearch benchmark
+# Shows how to wire a bash workload into the evolution framework
+
+name: filesearch_demo
+
+# These paths are relative to this config file
+source_dir: "../../.."          # not needed for the demo, but required by schema
+build_dir: "."
+output_binary: "dummy"          # no real binary for the demo
+
+compilation:
+  compiler: "clang-14"
+  build_command: "make"
+  build_target: "dummy"
+  build_timeout: 30
+  syntax_timeout: 10
+
+# -----------------------------------------------------------------------
+# Benchmarks - this is the interesting part
+# -----------------------------------------------------------------------
+benchmarks:
+  - name: filesearch
+    # The bash script that actually does the work
+    launch_script: "examples/filesearch_demo/run_benchmark.sh"
+    results_file: "examples/filesearch_demo/results.json"
+    timeout: 300
+    weight: 1.0
+
+    # Run 3 iterations, average the results for stability
+    iterations: 1          # framework-level iterations (the script does its own)
+    iteration_aggregation: avg
+
+    # Baseline values for scoring (hook_score = baseline / measured)
+    # Lower runtime = better, so 60s baseline means 30s gets score 2.0
+    baseline_values:
+      time: 60.0
+
+    hooks:
+      - type: time
+        weight: 1.0
+
+  # Example: add throughput hook reading from the JSON results
+  # - name: filesearch_throughput
+  #   launch_script: "examples/filesearch_demo/run_benchmark.sh"
+  #   results_file: "examples/filesearch_demo/results.json"
+  #   timeout: 300
+  #   weight: 0.5
+  #   baseline_values:
+  #     throughput: 1.0
+  #   hooks:
+  #     - type: throughput
+  #       weight: 1.0
+  #       json_path: "results.passes"
+  #       unit: "passes"
+
+prompt: |
+  This is a demo target. Optimize file search performance.
