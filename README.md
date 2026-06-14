@@ -1,6 +1,6 @@
-# evo_cache
+# mem_evolve
 
-**evo_cache** automatically evolves Linux page-cache eviction policies using
+**mem_evolve** automatically evolves Linux page-cache eviction policies using
 LLM-driven code generation. Policies are written as eBPF programs against the
 [`cache_ext`](https://github.com/cache-ext/cache_ext) kernel (a custom 6.6.8
 build from the SOSP 2025 *cache_ext* paper). A Python coordinator mutates
