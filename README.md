@@ -8,6 +8,46 @@ policies across parallel search branches, evaluates each candidate on a
 cgroup-isolated benchmark, and feeds kernel-level probe measurements back to the
 LLM so the next mutation is informed by real performance data.
 
+## Paper
+
+> **MemEvolve: Evolving Page Cache Policies with LLMs**
+> Dhruv Desai, Yashwanth Ranjan Singaravel, Michael Swift
+> University of Wisconsin–Madison
+> 📄 [**MemEvolve_Thesis.pdf**](MemEvolve_Thesis.pdf)
+
+The Linux page cache relies on general-purpose, mostly LRU-derived eviction
+strategies that are not tuned to any particular workload. MemEvolve is an offline
+framework that uses an LLM to generate candidate eviction policies directly as
+native eBPF code, searches over them with breadth-first evolution, and deploys
+the winners in a running kernel through `cache_ext` — so evolved policies run in
+a real kernel, not a simulator. The evolution loop follows the
+iterative-refinement-with-execution-feedback pattern (Self-Refine, Reflexion,
+Voyager): each candidate's kernel-level probe feedback — cgroup refault counts,
+I/O byte counts, and policy-declared counters — is fed back into the next round's
+prompt so the model refines its proposals rather than guessing blindly. The
+central finding is that **specialization, not universality, is where LLM-driven
+policy synthesis earns its keep**: policies evolved for a specific workload
+consistently beat the general-purpose baselines `cache_ext` ships with.
+
+Key ideas:
+
+- **Native-code policy synthesis with real deployment** — the LLM writes eBPF,
+  and winners load into a live kernel via `cache_ext` (no rebuild, no simulator).
+- **Kernel-probe feedback channel** — cgroup-level refault counts, I/O bytes, and
+  counters dumped on exit are threaded back into the next round's prompt as the
+  gradient that drives mutation.
+- **Three-role split on different timescales** — a planner (runs once, seeds K
+  branches), a mutator (hot path, one focused edit per branch per round), and a
+  frontier reviewer (periodically reshapes the population: continue / kill /
+  pivot / spawn), with per-branch chat-history compaction to keep prompts bounded.
+- **Lightweight distributed evaluator** — one branch is pinned to one host per
+  round to keep cross-cgroup cache interference out of the score, making the inner
+  loop tractable in wall-clock time on a small cluster.
+- **Three case studies** — a synthetic adversarial workload (`scan_thrash`), a
+  real production trace (`twitter_leveldb_ro`), and a novel LLM-driven workload
+  (`agent_swarm`); the policy-counter feedback channel is what lets the search
+  converge when headroom is small.
+
 ## How it works
 
 ```
