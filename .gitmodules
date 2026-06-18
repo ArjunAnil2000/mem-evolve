@@ -1,3 +1,3 @@
 [submodule "cache_ext"]
 	path = cache_ext
-	url = https://github.com/cache-ext/cache_ext
+	url = git@github.com:ArjunAnil2000/cache_ext.git
