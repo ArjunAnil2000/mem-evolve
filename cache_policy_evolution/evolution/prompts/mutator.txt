@@ -3,6 +3,16 @@ policies written as eBPF (cache_ext) programs. You operate as one of several
 parallel DFS branches; you accumulate memory across rounds of what you have
 already tried *on this branch*. Prefer targeted changes over rewrites.
 
+Every policy in this run is built on vulcan_bpf, a small BPF listener
+library for per-folio recency/frequency tracking and a handful of global
+signals (see the VULCAN_BPF ACCESSORS section below). This is a hard
+requirement, not an option: your mutations must stay grounded in vulcan_bpf
+primitives. Never delete the `vulcan_bpf.h`/`vulcan_feature.h` includes,
+never stop calling `vulcan_folio_on_access`/`vulcan_update_feature`, and
+never hand-roll your own MinMax/EWMA/Average/RollingWindow tracking when
+vulcan_bpf already provides it — use the listener primitives for any such
+signal instead.
+
 ============================================================================
 START SMALL, THEN ITERATE
 ============================================================================
@@ -65,6 +75,14 @@ F. BPF globals the loader reads via `skel->bss->NAME` MUST be declared as
    (3) read it in the loader as `skel->bss->NAME`. Forgetting any of
    these three steps breaks the build or the counter read.
 
+G. Never remove or bypass the vulcan_bpf scaffolding (the includes, the
+   `folio_metadata`/`vulcan` struct embedding, the `vulcan_*` calls in
+   folio_added/accessed/evicted). If you want a new signal, add it as a
+   vulcan_bpf listener (a new per-folio config flag, or a new global
+   feature id) rather than writing your own tracking next to it. A
+   mutation that drops vulcan_bpf usage is out of scope for this run,
+   even if it would score well.
+
 ============================================================================
 POLICY METRICS — FEEDBACK CONVENTION (zero per-access overhead)
 ============================================================================
@@ -113,6 +131,58 @@ Useful things to dump:
 Names appear verbatim in feedback — pick descriptive ones. This metric
 data is recorded only (direction="record"), it does NOT contribute to
 your score. Throughput is the score.
+
+============================================================================
+VULCAN_BPF ACCESSORS
+============================================================================
+
+Every seed in this run includes "vulcan_bpf.h" / "vulcan_feature.h" and you
+keep using them throughout — this is your only toolkit for tracking
+recency/frequency and any other signal you want the eviction decision to
+use. Any global feature must be computable from data already available
+inside folio_added/accessed/evicted/evict_folios — feed vulcan features
+only from struct_ops handlers, nothing else.
+
+Per-folio (embedded in your own folio-keyed map value, e.g.
+`struct folio_metadata { struct vulcan_folio_metadata vulcan; };`):
+
+  vulcan_folio_init(now)                              -- construct, in folio_added
+  vulcan_folio_on_access(&meta->vulcan, now, &cfg)    -- call once per
+                                                          folio_accessed
+  vulcan_ewma_get(&meta->vulcan.interval_ewma)        -- smoothed inter-
+                                                          access interval
+                                                          (smaller = hotter)
+  vulcan_minmax_get_min/max(&meta->vulcan.interval_minmax)
+  meta->vulcan.access_count                           -- raw touch count.
+    GOTCHA: access_count <= 1 means interval_ewma is still uninitialized
+    (reads as 0, which looks artificially "hot"). Always check
+    access_count before trusting interval_ewma.
+
+Global (cache-internal only — fed exclusively from struct_ops handlers):
+
+  #define VULCAN_NUM_GLOBAL_FEATURES <N>
+  enum { GF_FOO = 0, GF_BAR = 1, ... };   // declare BEFORE
+                                           // #include "vulcan_feature.h"
+  vulcan_update_feature(GF_X, raw_value, &cfg)   -- feed an observation
+  vulcan_get_min/max/avg/ewma(GF_X)              -- read back
+  vulcan_get_latest/kth_recent/window_avg/window_count(GF_X)  -- RollingWindow only
+
+Listener kinds available in this build: MinMax, EWMA, Average, Rolling
+Window. RollingPercentile and RollingCount are NOT ported to vulcan_bpf —
+do not reference them, they don't exist here.
+
+Counter-overhead note (reuses the cost model above): vulcan's own update
+calls (`vulcan_folio_on_access`, `vulcan_update_feature`) are already
+plain, non-atomic map writes — they follow the cheap convention by
+construction. If you ALSO want a manual `g_*` counter to surface
+vulcan-derived state via evo_dump, bump it from a naturally low-frequency
+event (e.g. eviction), not from folio_accessed — that hot path runs once
+per cache hit. An earlier version of the vulcan_recency seed had a
+`g_promotions` counter incremented inside folio_accessed and it was
+removed for exactly this reason. Prefer reading existing vulcan accessors
+(`vulcan_get_ewma(GF_X)`, `meta->vulcan.access_count`) directly in your
+feedback dump over adding a new counter that duplicates what a listener
+already tracks.
 
 ============================================================================
 OUTPUT FORMAT

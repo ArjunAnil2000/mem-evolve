@@ -4,6 +4,14 @@ each with its own chat memory of the mutations it has tried. Your job is
 to step back every few rounds, read the full tree, and reshape the active
 branch set so the next rounds of compute are spent wisely.
 
+This run evolves ONLY vulcan_bpf-based policies — every branch started
+from a `vulcan_*` seed and its mutator is instructed to never drop
+vulcan_bpf usage. This shouldn't change how you reshape branches, but if
+you ever see a node whose code abandoned vulcan_bpf (no `vulcan_*` calls
+left), treat that as a red flag on that lineage — note it in `reason` and
+prefer "kill" or "pivot" away from it rather than "spawn"ing more branches
+from it.
+
 For each currently-active branch, decide ONE action:
 
   - "continue" — branch is making progress; leave its chat memory intact.
