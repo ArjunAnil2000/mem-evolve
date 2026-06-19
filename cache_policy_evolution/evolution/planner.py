@@ -33,9 +33,28 @@ def _load_prompt() -> str:
         return f.read()
 
 
+def _is_boilerplate_comment(text: str) -> bool:
+    """True for the `// ====` / `// SECTION: ...` / `// EVOLVE-BLOCK-*`
+    markers every seed file starts with — never real description text."""
+    if not text:
+        return True
+    if set(text) <= {"="}:
+        return True
+    if text.startswith("SECTION:"):
+        return True
+    if text in ("EVOLVE-BLOCK-START", "EVOLVE-BLOCK-END"):
+        return True
+    return False
+
+
 def _summarise_seed(seed_code: str, max_chars: int = 400) -> str:
-    """Grab the first comment / leading prose of a seed file as its summary."""
-    # Collect leading line-comments.
+    """Grab the first real descriptive comment near the top of a seed file.
+
+    Every seed starts with the `// ====` / `// SECTION: ...` /
+    `// EVOLVE-BLOCK-START` boilerplate before any actual prose, so those
+    lines (and any non-comment lines, e.g. #include, in between) are
+    skipped while searching for a genuine description.
+    """
     lines = seed_code.splitlines()
     summary_lines = []
     for ln in lines[:30]:
@@ -45,9 +64,14 @@ def _summarise_seed(seed_code: str, max_chars: int = 400) -> str:
                 break
             continue
         if s.startswith("//"):
-            summary_lines.append(s.lstrip("/").strip())
+            text = s.lstrip("/").strip()
+            if _is_boilerplate_comment(text):
+                continue
+            summary_lines.append(text)
         elif s.startswith("/*") or s.startswith("*"):
-            summary_lines.append(s.lstrip("/* ").strip())
+            text = s.lstrip("/* ").strip()
+            if text and not _is_boilerplate_comment(text):
+                summary_lines.append(text)
         elif summary_lines:
             break
     text = " ".join(summary_lines).strip()
