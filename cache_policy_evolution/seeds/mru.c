@@ -2,6 +2,8 @@
 // SECTION: BPF KERNEL CODE
 // ============================================================================
 // EVOLVE-BLOCK-START
+// MRU: move-to-head on access, evict from head (most-recently-used
+// evicted first) — adversarial baseline, not meant to score well.
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>

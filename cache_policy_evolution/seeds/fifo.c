@@ -2,6 +2,7 @@
 // SECTION: BPF KERNEL CODE
 // ============================================================================
 // EVOLVE-BLOCK-START
+// Plain FIFO: insertion-order list, evict from head, no access tracking.
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>

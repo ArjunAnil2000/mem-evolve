@@ -2,6 +2,8 @@
 // SECTION: BPF KERNEL CODE
 // ============================================================================
 // EVOLVE-BLOCK-START
+// S3-FIFO: small+main two-list frequency-based admission, with a ghost
+// map tracking recently-evicted folios for re-admission decisions.
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>

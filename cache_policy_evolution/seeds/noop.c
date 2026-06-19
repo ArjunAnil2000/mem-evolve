@@ -2,6 +2,8 @@
 // SECTION: BPF KERNEL CODE
 // ============================================================================
 // EVOLVE-BLOCK-START
+// No-op: registers struct_ops but makes no eviction decisions; vanilla
+// kernel reclaim baseline, used for calibration.
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>

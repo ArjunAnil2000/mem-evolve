@@ -2,6 +2,8 @@
 // SECTION: BPF KERNEL CODE
 // ============================================================================
 // EVOLVE-BLOCK-START
+// Scan-resistant LRU: single list, promote to tail only on re-access, so
+// one-shot scan pages stay near the head and get evicted quickly.
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>

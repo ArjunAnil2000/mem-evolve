@@ -2,6 +2,8 @@
 // SECTION: BPF KERNEL CODE
 // ============================================================================
 // EVOLVE-BLOCK-START
+// vulcan_bpf-based recency policy: per-folio EWMA of access interval plus
+// a cache-internal eviction-pressure feature, single list, page-cache-only.
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
