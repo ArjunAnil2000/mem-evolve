@@ -34,7 +34,6 @@ static u64 last_evict_ts;
  * LLM feedback — see evo_dump.h. Cheap because they're only bumped once
  * per eviction, not per access. */
 __u64 g_evictions = 0;
-__u64 g_promotions = 0;
 __s64 g_evict_pressure_ewma_ns = 0;
 
 struct folio_metadata {
@@ -127,10 +126,8 @@ void BPF_STRUCT_OPS(evo_policy_folio_accessed, struct folio *folio) {
 		return;
 
 	struct folio_metadata *data = get_folio_metadata(folio);
-	if (data) {
+	if (data)
 		vulcan_folio_on_access(&data->vulcan, bpf_ktime_get_ns(), &folio_cfg);
-		__sync_fetch_and_add(&g_promotions, 1);
-	}
 
 	/* Promote to tail (protected end) on re-access - the scan-resistance
 	 * mechanism: one-shot scan pages stay near the head and get evicted,
@@ -337,7 +334,6 @@ int main(int argc, char **argv) {
 		FILE *m = evo_metrics_open();
 		evo_dump_str(m, "policy_name", "vulcan_recency");
 		evo_dump_u64(m, "evictions", skel->bss->g_evictions);
-		evo_dump_u64(m, "promotions", skel->bss->g_promotions);
 		evo_dump_s64(m, "evict_pressure_ewma_ns", skel->bss->g_evict_pressure_ewma_ns);
 		evo_metrics_close(m);
 	}
