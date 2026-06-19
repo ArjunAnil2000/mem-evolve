@@ -49,6 +49,31 @@ def _stage_policy_lib_headers(policies_dir: str) -> None:
             shutil.copy2(src, os.path.join(policies_dir, name))
 
 
+# vulcan_bpf headers live in cache_ext itself, as a sibling submodule of
+# policies_dir (cache_ext/vulcan_bpf/), not in mem-evolve's own policy_lib/
+# — so they're staged relative to policies_dir rather than to this file's
+# location. Same rationale as _stage_policy_lib_headers above: the
+# Makefile's BPF rule has no project -I flags and resolves quote-includes
+# from the including file's own directory, so the headers must physically
+# land in policies_dir before each build.
+_VULCAN_BPF_HEADERS = ("vulcan_bpf.h", "vulcan_feature.h")
+
+
+def _stage_vulcan_bpf_headers(policies_dir: str) -> None:
+    """Copy vulcan_bpf headers into policies_dir.
+
+    Silent if the vulcan_bpf submodule isn't present/initialized — seeds
+    that don't use vulcan_bpf are unaffected either way.
+    """
+    src_dir = os.path.normpath(os.path.join(policies_dir, "..", "vulcan_bpf"))
+    if not os.path.isdir(src_dir):
+        return
+    for name in _VULCAN_BPF_HEADERS:
+        src = os.path.join(src_dir, name)
+        if os.path.isfile(src):
+            shutil.copy2(src, os.path.join(policies_dir, name))
+
+
 # The stub skeleton header lets the loader's userspace .c syntax-check
 # before `make` generates the real one. Kept alongside the compile logic
 # so nothing else in the codebase has to know about it.
@@ -122,6 +147,7 @@ def compile_policy(
 
     try:
         _stage_policy_lib_headers(policies_dir)
+        _stage_vulcan_bpf_headers(policies_dir)
         with open(os.path.join(policies_dir, "evo_policy.bpf.c"), "w") as f:
             f.write(bpf)
         with open(os.path.join(policies_dir, "evo_policy.c"), "w") as f:
