@@ -2,12 +2,12 @@
 # parse_ssh.sh — Extract hostnames from SSH connection strings
 #
 # Usage:
-#   ./parse_ssh.sh "ssh ddesai@host1" "ssh user@host2" ...
-#   echo "ssh ddesai@host1" | ./parse_ssh.sh
+#   ./parse_ssh.sh "ssh aanil3@host1" "ssh user@host2" ...
+#   echo "ssh aanil3@host1" | ./parse_ssh.sh
 #   ./parse_ssh.sh < file_with_ssh_lines.txt
 #
 # Pipe into setup_cloudlab.sh:
-#   ./setup_cloudlab.sh --pat <TOKEN> $(./parse_ssh.sh "ssh ddesai@host1" "ssh ddesai@host2")
+#   ./setup_cloudlab.sh --pat <TOKEN> $(./parse_ssh.sh "ssh aanil3@host1" "ssh aanil3@host2")
 
 set -euo pipefail
 

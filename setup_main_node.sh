@@ -8,12 +8,15 @@
 #   6. drop you into an interactive SSH session on the host
 #
 # Usage:
-#   ./setup_main_node.sh --pat <GITHUB_PAT> <host>
+#   ./setup_main_node.sh <host>
 #
 # Options:
-#   --pat <token>       GitHub PAT (skip if repo already cloned on the node)
-#   --user <user>       SSH user              (default: ddesai)
-#   --ssh-key <path>    SSH key               (default: ~/.ssh/id_rsa)
+#   --pat <token>       GitHub PAT. Optional — only needed if the repo
+#                       being cloned is private. The default repo
+#                       (ArjunAnil2000/mem-evolve) is public, so a plain
+#                       anonymous clone is used when --pat is omitted.
+#   --user <user>       SSH user              (default: aanil3)
+#   --ssh-key <path>    SSH key               (default: ~/.ssh/id_ed25519)
 #   --base-dir <path>   Install root          (default: /mydata)
 #   --port <port>       claude_api port       (default: 8082)
 #   --no-shell          Skip the final interactive ssh
@@ -21,8 +24,8 @@
 set -euo pipefail
 
 PAT=""
-SSH_USER="ddesai"
-SSH_KEY="$HOME/.ssh/id_rsa"
+SSH_USER="aanil3"
+SSH_KEY="$HOME/.ssh/id_ed25519"
 BASE_DIR="/mydata"
 PORT="8082"
 NO_SHELL=false
@@ -61,14 +64,19 @@ log "[$HOST] fixing ${BASE_DIR} ownership"
 run_remote "sudo mkdir -p ${BASE_DIR} && sudo chown -R ${SSH_USER} ${BASE_DIR} && sudo chmod 755 ${BASE_DIR}"
 ok   "[$HOST] ${BASE_DIR} owned by ${SSH_USER}"
 
-# 2) Clone repo (if missing)
+# 2) Clone repo (if missing). Public repo -> plain anonymous clone. Only
+#    embed a PAT in the URL if one was actually passed (private fork case).
 if run_remote "test -d ${REPO_DIR}/.git"; then
     log "[$HOST] repo already present — pulling"
     run_remote "cd ${REPO_DIR} && git pull --ff-only && git submodule update --init --recursive"
 else
-    [[ -z "$PAT" ]] && { err "repo missing and --pat not given"; exit 1; }
+    if [[ -n "$PAT" ]]; then
+        CLONE_URL="https://ArjunAnil2000:${PAT}@github.com/ArjunAnil2000/mem-evolve"
+    else
+        CLONE_URL="https://github.com/ArjunAnil2000/mem-evolve"
+    fi
     log "[$HOST] cloning repo"
-    run_remote "git clone https://1611Dhruv:${PAT}@github.com/1611Dhruv/evo_cache ${REPO_DIR} && cd ${REPO_DIR} && git submodule update --init --recursive"
+    run_remote "git clone ${CLONE_URL} ${REPO_DIR} && cd ${REPO_DIR} && git submodule update --init --recursive"
 fi
 ok   "[$HOST] repo ready at ${REPO_DIR}"
 

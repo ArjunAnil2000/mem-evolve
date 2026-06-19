@@ -9,11 +9,11 @@
 #
 # Usage:
 #   ./start_workers.sh host1 host2 host3
-#   ./start_workers.sh $(./parse_ssh.sh "ssh ddesai@host1" "ssh ddesai@host2")
+#   ./start_workers.sh $(./parse_ssh.sh "ssh aanil3@host1" "ssh aanil3@host2")
 #
 # Options:
-#   --user <user>       SSH user                (default: ddesai)
-#   --ssh-key <path>    SSH key                 (default: ~/.ssh/id_rsa)
+#   --user <user>       SSH user                (default: aanil3)
+#   --ssh-key <path>    SSH key                 (default: ~/.ssh/id_ed25519)
 #   --base-dir <path>   Repo parent on remote   (default: ~)
 #   --port <port>       Worker listen port      (default: 8080)
 #   --token <str>       Shared auth token; passed as X-Auth-Token by clients
@@ -55,8 +55,8 @@
 
 set -euo pipefail
 
-SSH_USER="ddesai"
-SSH_KEY="$HOME/.ssh/id_rsa"
+SSH_USER="aanil3"
+SSH_KEY="$HOME/.ssh/id_ed25519"
 BASE_DIR="/mydata"
 PORT="8080"
 TOKEN=""

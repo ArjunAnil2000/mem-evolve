@@ -2,13 +2,16 @@
 # setup_cloudlab.sh — Initialize CloudLab machines for evo_cache
 #
 # Usage:
-#   ./setup_cloudlab.sh --pat <GITHUB_PAT> node0.foo.emulab.net node1.foo.emulab.net ...
+#   ./setup_cloudlab.sh node0.foo.emulab.net node1.foo.emulab.net ...
 #   ./setup_cloudlab.sh --update node0 node1 ...          # just git-pull on each host
 #
 # Options:
-#   --pat <token>       GitHub personal access token (required unless --update)
-#   --user <user>       SSH user (default: ddesai)
-#   --ssh-key <path>    SSH key path (default: ~/.ssh/id_rsa)
+#   --pat <token>       GitHub personal access token. Optional — only needed
+#                       if the repo being cloned is private. The default
+#                       repo (ArjunAnil2000/mem-evolve) is public, so a plain
+#                       anonymous clone is used when --pat is omitted.
+#   --user <user>       SSH user (default: aanil3)
+#   --ssh-key <path>    SSH key path (default: ~/.ssh/id_ed25519)
 #   --skip-reboot       Skip kernel install + reboot (for already-rebooted machines)
 #   --dry-run           Print commands without executing
 #   --base-dir <path>   Base directory on remote machines (default: ~)
@@ -35,8 +38,8 @@ set -euo pipefail
 # Defaults
 # ------------------------------------------------------------------
 PAT=""
-SSH_USER="ddesai"
-SSH_KEY="$HOME/.ssh/id_rsa"
+SSH_USER="aanil3"
+SSH_KEY="$HOME/.ssh/id_ed25519"
 SKIP_REBOOT=false
 DRY_RUN=false
 VERBOSE=false
@@ -90,11 +93,6 @@ while [[ $# -gt 0 ]]; do
             HOSTS+=("$1"); shift ;;
     esac
 done
-
-if [[ -z "$PAT" ]] && ! $UPDATE_ONLY; then
-    err "GitHub PAT is required. Use --pat <token>  (not needed for --update)"
-    exit 1
-fi
 
 if [[ ${#HOSTS[@]} -eq 0 ]]; then
     err "No hosts specified. Pass hostnames as positional arguments."
@@ -170,13 +168,20 @@ phase1_setup() {
         sudo chmod 755 $BASE_DIR
     "
 
-    # Clone repo
+    # Clone repo. Public repo -> plain anonymous clone. Only embed a PAT in
+    # the URL if one was actually passed (e.g. cloning a private fork).
+    local clone_url
+    if [[ -n "$PAT" ]]; then
+        clone_url="https://ArjunAnil2000:${PAT}@github.com/ArjunAnil2000/mem-evolve"
+    else
+        clone_url="https://github.com/ArjunAnil2000/mem-evolve"
+    fi
     run_remote "$host" "
         if [ -d '$REPO_DIR/.git' ]; then
             echo 'Repo already exists, pulling latest...'
             cd $REPO_DIR && git pull
         else
-            git clone https://1611Dhruv:${PAT}@github.com/1611Dhruv/evo_cache $REPO_DIR
+            git clone $clone_url $REPO_DIR
         fi
     "
 
