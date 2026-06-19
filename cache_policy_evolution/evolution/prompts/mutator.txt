@@ -163,6 +163,12 @@ Global (cache-internal only — fed exclusively from struct_ops handlers):
   #define VULCAN_NUM_GLOBAL_FEATURES <N>
   enum { GF_FOO = 0, GF_BAR = 1, ... };   // declare BEFORE
                                            // #include "vulcan_feature.h"
+  GOTCHA: N must be >= 1. vulcan_feature.h sizes its global BPF_MAP_TYPE_ARRAY
+  maps with max_entries=VULCAN_NUM_GLOBAL_FEATURES; setting it to 0 to drop
+  unused global tracking fails BPF map creation at load time
+  (libbpf: bpf_create_map_xattr(vulcan_gminmax): Invalid argument). If you
+  don't need any global features, leave N=1 with a single unused/placeholder
+  feature id rather than 0.
   vulcan_update_feature(GF_X, raw_value, &cfg)   -- feed an observation
   vulcan_get_min/max/avg/ewma(GF_X)              -- read back
   vulcan_get_latest/kth_recent/window_avg/window_count(GF_X)  -- RollingWindow only
