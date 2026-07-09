@@ -78,17 +78,17 @@ workers = []
 cgroup = "/sys/fs/cgroup/cache_ext_evo_bench"
 
 [llm.mutator]
-model       = "claude-sonnet-4-6"
+model       = "claude-sonnet"
 provider    = "openai"
-api_base    = "http://localhost:8082/v1"
-api_key_env = "OPENAI_API_KEY"
+api_base    = "http://localhost:4000/v1"
+api_key_env = "LITELLM_MASTER_KEY"
 temperature = 0.85
 
 [llm.planner]
-model       = "claude-opus-4-7"
+model       = "claude-opus"
 provider    = "openai"
-api_base    = "http://localhost:8082/v1"
-api_key_env = "OPENAI_API_KEY"
+api_base    = "http://localhost:4000/v1"
+api_key_env = "LITELLM_MASTER_KEY"
 temperature = 0.5
 
 # Workload-specific probes — pulled out of $JOB_DIR/results.json by the
