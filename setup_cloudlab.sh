@@ -185,10 +185,12 @@ phase1_setup() {
         fi
     "
 
-    # Init submodules (cache_ext is itself a submodule)
-    run_remote "$host" "
-        cd $REPO_DIR && git submodule update --init --recursive
-    "
+    # Init submodules (cache_ext is itself a submodule). cache_ext's own
+    # .gitmodules used to register `vulcan_bpf` over SSH, which fails auth
+    # on a fresh machine with no deploy key — fixed upstream as of
+    # cache_ext@7c796e5, which mem-evolve now pins.
+    run_remote "$host" "cd $REPO_DIR && git submodule update --init --recursive" \
+        || { err "[$host] Failed to init submodules"; return 1; }
 
     ok "[$host] Repo cloned and submodules initialized"
 }
@@ -203,11 +205,11 @@ phase2_kernel() {
     # Auto-answer kernel install prompts: 1, Y, 1, N
     run_remote "$host" "
         cd $REPO_DIR/cache_ext && printf '1\nY\n1\nN\n' | bash ./install_kernel.sh
-    "
+    " || { err "[$host] install_kernel.sh failed — not rebooting"; return 1; }
 
     run_remote "$host" "
         sudo grub-reboot 'Advanced options for Ubuntu>Ubuntu, with Linux 6.6.8-cache-ext+'
-    "
+    " || { err "[$host] grub-reboot failed — not rebooting"; return 1; }
 
     ok "[$host] Kernel installed, rebooting..."
     run_remote "$host" "sudo reboot now" || true  # reboot kills the SSH session
@@ -267,25 +269,29 @@ phase4_post_reboot() {
         warn "[$host] Proceeding anyway, but cache_ext may not work"
     fi
 
-    # Install Python 3.11
+    # Install Python 3.11. Note: deadsnakes' PPA slug is "ppa", not "python".
     run_remote "$host" "
         sudo -A apt-get install -y software-properties-common &&
-        sudo -A add-apt-repository -y ppa:deadsnakes/python &&
+        sudo -A add-apt-repository -y ppa:deadsnakes/ppa &&
         sudo -A apt-get update &&
         sudo -A apt-get install -y python3.11 python3.11-venv python3.11-dev python3.11-distutils
-    "
+    " || { err "[$host] Python 3.11 install failed"; return 1; }
     ok "[$host] Python 3.11 installed"
 
-    run_remote "$host" "cd $REPO_DIR/cache_ext && bash ./install_filesearch.sh"
+    run_remote "$host" "cd $REPO_DIR/cache_ext && bash ./install_filesearch.sh" \
+        || { err "[$host] install_filesearch.sh failed"; return 1; }
     ok "[$host] install_filesearch.sh done"
 
-    run_remote "$host" "cd $REPO_DIR/cache_ext && bash ./install_misc.sh"
+    run_remote "$host" "cd $REPO_DIR/cache_ext && bash ./install_misc.sh" \
+        || { err "[$host] install_misc.sh failed"; return 1; }
     ok "[$host] install_misc.sh done"
 
-    run_remote "$host" "cd $REPO_DIR/cache_ext && bash ./setup_isolation.sh"
+    run_remote "$host" "cd $REPO_DIR/cache_ext && bash ./setup_isolation.sh" \
+        || { err "[$host] setup_isolation.sh failed"; return 1; }
     ok "[$host] setup_isolation.sh done"
 
-    run_remote "$host" "cd $REPO_DIR/cache_ext && bash ./build_policies.sh"
+    run_remote "$host" "cd $REPO_DIR/cache_ext && bash ./build_policies.sh" \
+        || { err "[$host] build_policies.sh failed"; return 1; }
     ok "[$host] build_policies.sh done"
 
     ok "[$host] Phase 4 complete"
@@ -317,6 +323,46 @@ phase_update() {
 }
 
 # ------------------------------------------------------------------
+# Helper: run a phase function across hosts in parallel, tracking which
+# hosts actually succeeded (background jobs can't mutate the parent shell's
+# variables, so we wait on each PID individually to recover its exit code).
+# Prints surviving hostnames on stdout, one per line; appends failures to
+# FAILED_HOSTS.
+# ------------------------------------------------------------------
+FAILED_HOSTS=()
+PHASE_SURVIVORS=()
+
+# Runs $fn across all given hosts in parallel. Must be called directly (not
+# via `$(...)`/`< <(...)`)  — log/ok/err/run_remote all print to stdout, so
+# capturing this function's stdout would swallow that logging into whatever
+# is meant to receive the result. Instead it sets the global array
+# PHASE_SURVIVORS as a side effect, since it runs in the caller's shell.
+run_phase_parallel() {
+    local fn="$1"; shift
+    local hosts=("$@")
+    local pids=()
+    local host
+
+    PHASE_SURVIVORS=()
+
+    for host in "${hosts[@]}"; do
+        "$fn" "$host" &
+        pids+=("$!")
+    done
+
+    local i=0
+    for host in "${hosts[@]}"; do
+        if wait "${pids[$i]}"; then
+            PHASE_SURVIVORS+=("$host")
+        else
+            err "[$host] phase failed — dropping from remaining phases"
+            FAILED_HOSTS+=("$host")
+        fi
+        i=$((i + 1))
+    done
+}
+
+# ------------------------------------------------------------------
 # Main
 # ------------------------------------------------------------------
 
@@ -335,54 +381,61 @@ fi
 
 if $WORKERS_ONLY; then
     log "=== Workers-only mode: skipping clone/kernel/reboot ==="
-    for host in "${HOSTS[@]}"; do
-        phase4_post_reboot "$host" &
-    done
-    wait
-    ok "=== All machines setup complete ==="
+    run_phase_parallel phase4_post_reboot "${HOSTS[@]}"
+    LIVE_HOSTS=("${PHASE_SURVIVORS[@]}")
+    ok "=== Post-reboot setup complete on: ${LIVE_HOSTS[*]:-<none>} ==="
+    [[ ${#FAILED_HOSTS[@]} -gt 0 ]] && { err "Failed: ${FAILED_HOSTS[*]}"; exit 1; }
     exit 0
 fi
 
 # Phase 1: Clone in parallel
 log "=== Phase 1: Cloning repos ==="
-for host in "${HOSTS[@]}"; do
-    phase1_setup "$host" &
-done
-wait
-ok "=== Phase 1 complete ==="
+run_phase_parallel phase1_setup "${HOSTS[@]}"
+LIVE_HOSTS=("${PHASE_SURVIVORS[@]}")
+[[ ${#LIVE_HOSTS[@]} -eq 0 ]] && { err "Phase 1 failed on every host"; exit 1; }
+ok "=== Phase 1 complete on: ${LIVE_HOSTS[*]} ==="
 
 if ! $SKIP_REBOOT; then
     # Phase 2: Install kernel + reboot
     log "=== Phase 2: Installing kernel + rebooting ==="
     if $PARALLEL; then
-        for host in "${HOSTS[@]}"; do
-            phase2_kernel "$host" &
-        done
-        wait
+        run_phase_parallel phase2_kernel "${LIVE_HOSTS[@]}"
+        LIVE_HOSTS=("${PHASE_SURVIVORS[@]}")
     else
-        for host in "${HOSTS[@]}"; do
-            phase2_kernel "$host"
+        survivors=()
+        for host in "${LIVE_HOSTS[@]}"; do
+            if phase2_kernel "$host"; then
+                survivors+=("$host")
+            else
+                FAILED_HOSTS+=("$host")
+            fi
         done
+        LIVE_HOSTS=("${survivors[@]}")
     fi
-    ok "=== Phase 2 complete (all rebooting) ==="
+    [[ ${#LIVE_HOSTS[@]} -eq 0 ]] && { err "Phase 2 failed on every host"; exit 1; }
+    ok "=== Phase 2 complete (rebooting): ${LIVE_HOSTS[*]} ==="
 
     # Phase 3: Wait for all to come back
     log "=== Phase 3: Waiting for reboot ==="
     sleep 10  # give them a moment to actually go down
-    wait_for_hosts "${HOSTS[@]}"
+    wait_for_hosts "${LIVE_HOSTS[@]}"
     ok "=== Phase 3 complete ==="
 fi
 
 # Phase 4: Post-reboot setup in parallel
 log "=== Phase 4: Post-reboot setup ==="
-for host in "${HOSTS[@]}"; do
-    phase4_post_reboot "$host" &
-done
-wait
-ok "=== All machines setup complete ==="
+run_phase_parallel phase4_post_reboot "${LIVE_HOSTS[@]}"
+LIVE_HOSTS=("${PHASE_SURVIVORS[@]}")
 
 echo ""
 log "Summary:"
 for host in "${HOSTS[@]}"; do
-    echo "  $host — ready"
+    if [[ " ${LIVE_HOSTS[*]} " == *" $host "* ]]; then
+        echo "  $host — ready"
+    else
+        echo "  $host — FAILED"
+    fi
 done
+
+[[ ${#FAILED_HOSTS[@]} -gt 0 ]] && exit 1
+exit 0
