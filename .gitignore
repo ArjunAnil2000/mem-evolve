@@ -27,3 +27,4 @@ evolution_analyzer/evolution_tree.html
 # Local agent config
 .claude/
 litellm-creds.sh
+cloudlab-instances.md
