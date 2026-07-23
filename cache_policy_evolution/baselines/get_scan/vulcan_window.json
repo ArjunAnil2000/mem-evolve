@@ -1,0 +1,89 @@
+{
+  "ok": true,
+  "error": "",
+  "score": -2577791657.996636,
+  "wallclock_sec": 38.985910556002636,
+  "probes": {
+    "wallclock": {
+      "name": "wallclock",
+      "value": 38.986542885002564,
+      "unit": "seconds",
+      "direction": "minimize",
+      "summary": "38.99s",
+      "details": {
+        "seconds": 38.986542885002564
+      }
+    },
+    "cgroup_iostat": {
+      "name": "cgroup_iostat",
+      "value": 5154967552.0,
+      "unit": "bytes",
+      "direction": "minimize",
+      "summary": "rbytes=4916.2MiB wbytes=0.0MiB rios=425200",
+      "details": {
+        "rbytes": 5154967552,
+        "wbytes": 49152,
+        "rios": 425200
+      }
+    },
+    "cgroup_memstat": {
+      "name": "cgroup_memstat",
+      "value": 1231489.0,
+      "unit": "refaults",
+      "direction": "minimize",
+      "summary": "refault_file=1231489 pgmajfault=82 pgactivate=167976 resident_file=21MiB",
+      "details": {
+        "delta": {
+          "workingset_refault_file": 1231489,
+          "workingset_activate_file": 432087,
+          "workingset_restore_file": 129712,
+          "pgfault": 32722,
+          "pgmajfault": 82,
+          "pgactivate": 167976,
+          "pgdeactivate": 484017,
+          "pgscan": 995537,
+          "pgsteal": 984369
+        },
+        "final": {
+          "file": 23052288,
+          "file_mapped": 0,
+          "file_dirty": 4096
+        }
+      }
+    },
+    "policy_counters": {
+      "name": "policy_counters",
+      "value": 0.0,
+      "unit": "",
+      "direction": "record",
+      "summary": "evictions=1252919 policy_name=vulcan_window pressure_rising_evictions=70590",
+      "details": {
+        "policy_name": "vulcan_window",
+        "evictions": 1252919,
+        "pressure_rising_evictions": 70590
+      }
+    }
+  },
+  "stdout_tail": "[get_scan] scan_pids map pinned at /sys/fs/bpf/cache_ext/scan_pids\n[get_scan] Reusing cached DB at /mydata/evo_get_scan_db\n[get_scan] Cgroup: cache_ext_baseline max=64MB\n[get_scan] Policy loader running (PID 17515)\n[get_scan] Running GET-SCAN (30s, 4 threads, scan=0.05, ENABLE_BPF_SCAN_MAP=1)...\n[get_scan] Throughput: 24450.97 ops/sec   READ p99=689991.97 ns   SCAN p99=2957073.22 ns   \u2192 /mydata/step3_results/exp-3__vulcan_window/results.json\n[get_scan] Done.\n",
+  "stderr_tail": "",
+  "workload_results": {
+    "throughput_ops_per_sec": 24450.97,
+    "read_throughput_ops_per_sec": 23690.72,
+    "scan_throughput_ops_per_sec": 760.24,
+    "read_avg_latency_ns": 122620.92,
+    "read_p99_latency_ns": 689991.97,
+    "scan_p99_latency_ns": 2957073.22,
+    "config": {
+      "db_nr_entry": 500000,
+      "key_size": 16,
+      "value_size": 200,
+      "cache_limit_mb": 64,
+      "runtime_seconds": 30,
+      "threads": 4,
+      "scan_proportion": 0.05,
+      "scan_length": 500,
+      "enable_bpf_scan_map": "1"
+    }
+  },
+  "seed_path": "/mydata/evo_cache/cache_policy_evolution/seeds/vulcan_window.c"
+}
