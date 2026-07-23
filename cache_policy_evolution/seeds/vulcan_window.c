@@ -153,7 +153,10 @@ void BPF_STRUCT_OPS(evo_policy_folio_accessed, struct folio *folio) {
 
 	struct folio_metadata *data = get_folio_metadata(folio);
 	if (data)
-		vulcan_folio_on_access(&data->vulcan, bpf_ktime_get_ns(), &folio_cfg);
+		vulcan_folio_on_access(&data->vulcan, bpf_ktime_get_ns(),
+				       BPF_CORE_READ(folio, _refcount.counter),
+				       BPF_CORE_READ(folio, _mapcount.counter),
+				       &folio_cfg);
 
 	/* Promote to tail (protected end) on re-access - the scan-resistance
 	 * mechanism: one-shot scan pages stay near the head and get evicted,
@@ -179,7 +182,15 @@ void BPF_STRUCT_OPS(evo_policy_folio_added, struct folio *folio) {
 		return;
 
 	u64 key = (u64)folio;
-	struct folio_metadata new_meta = { .vulcan = vulcan_folio_init(bpf_ktime_get_ns()) };
+	/* size_pages hardcoded to 1 (see cache_ext_lib.bpf.h folio_nr_pages);
+	 * is_anonymous=0 since watched folios are always file-backed (Fatal
+	 * Pitfall B); class_id=0/inert — no class-level feature store in
+	 * this experiment; client_tag=0 — not used by this seed's logic. */
+	struct folio_metadata new_meta = {
+		.vulcan = vulcan_folio_init(bpf_ktime_get_ns(), /*size_pages=*/1,
+					    /*is_anonymous=*/0, /*class_id=*/0,
+					    /*client_tag=*/0),
+	};
 	if (bpf_map_update_elem(&folio_metadata_map, &key, &new_meta, BPF_ANY)) {
 		bpf_printk("evo_policy: added: Failed to create metadata\n");
 		return;
