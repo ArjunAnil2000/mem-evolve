@@ -174,9 +174,22 @@ choose which listeners observe them and how you use the readback.
 Per-folio (embedded in your own folio-keyed map value, e.g.
 `struct folio_metadata { struct vulcan_folio_metadata vulcan; };`):
 
-  vulcan_folio_init(now)                              -- construct, in folio_added
-  vulcan_folio_on_access(&meta->vulcan, now, &cfg)    -- call once per
+  vulcan_folio_init(now, size_pages, is_anonymous, class_id, client_tag)
+                                                       -- construct, in folio_added.
+    class_id is inert in this run — there is no class-level feature store
+    built; pass 0 and never branch on it. It exists in the struct only
+    because it's part of core vulcan_bpf.h.
+  vulcan_folio_on_access(&meta->vulcan, now, refcount, mapcount, &cfg)
+                                                       -- call once per
                                                           folio_accessed
+  vulcan_folio_on_evict(&meta->vulcan)                -- call once per
+                                                          folio_evicted, IF
+                                                          your policy keeps
+                                                          the metadata entry
+                                                          alive across the
+                                                          eviction (see
+                                                          eviction_count
+                                                          gotcha below)
   vulcan_ewma_get(&meta->vulcan.interval_ewma)        -- smoothed inter-
                                                           access interval
                                                           (smaller = hotter)
@@ -185,6 +198,37 @@ Per-folio (embedded in your own folio-keyed map value, e.g.
     GOTCHA: access_count <= 1 means interval_ewma is still uninitialized
     (reads as 0, which looks artificially "hot"). Always check
     access_count before trusting interval_ewma.
+
+  Free per-folio fields (set once at vulcan_folio_init / refreshed on every
+  vulcan_folio_on_access — no listener attach needed, these aren't a
+  feature you toggle, they're always populated):
+    meta->vulcan.size_pages     -- folio_nr_pages at insertion. Use to
+                                    weight eviction cost by reclaimed bytes
+                                    instead of by folio count.
+    meta->vulcan.is_anonymous   -- 1 = anon, 0 = file-backed. Watched
+                                    folios in this benchmark are always
+                                    file-backed (see Fatal Pitfall B); this
+                                    is here for completeness, not expected
+                                    to vary within is_folio_relevant().
+    meta->vulcan.refcount_snap  -- folio->_refcount at last access.
+    meta->vulcan.mapcount_snap  -- folio->_mapcount at last access.
+                                    mapcount_snap > 0 means the folio is
+                                    currently mapped into a live page
+                                    table — evicting it is a near-certain
+                                    fault. Cheap evict-guard check, no
+                                    extra kernel read needed.
+    meta->vulcan.eviction_count -- GOTCHA: only increments if
+                                    vulcan_folio_on_evict() is called AND
+                                    the metadata entry survives the
+                                    eviction. The seed pattern deletes the
+                                    metadata map entry in folio_evicted
+                                    (see vulcan_recency-style seeds) —
+                                    under that pattern eviction_count never
+                                    exceeds 0/1 and is not a useful signal.
+                                    It only becomes meaningful if a
+                                    mutation keeps a ghost/tombstone entry
+                                    alive across eviction (a Tier 3
+                                    structural change, not a Tier 0-2 one).
 
 Global (cache-internal only — fed exclusively from struct_ops handlers):
 

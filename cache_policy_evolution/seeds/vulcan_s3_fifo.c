@@ -2,8 +2,13 @@
 // SECTION: BPF KERNEL CODE
 // ============================================================================
 // EVOLVE-BLOCK-START
-// S3-FIFO: small+main two-list frequency-based admission, with a ghost
-// map tracking recently-evicted folios for re-admission decisions.
+// vulcan_bpf-based S3-FIFO: small+main two-list frequency-based admission,
+// with a ghost map tracking recently-evicted folios for re-admission
+// decisions. Same admission algorithm as the plain s3_fifo seed (freq /
+// in_main / ghost_map are structural to S3-FIFO and are NOT vulcan_bpf
+// listeners — they stay hand-rolled). vulcan_bpf per-folio listeners
+// (interval MinMax/EWMA) are layered on top as an additional signal a
+// mutation can incorporate without touching the admission algorithm.
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
@@ -11,6 +16,8 @@
 
 #include "cache_ext_lib.bpf.h"
 #include "dir_watcher.bpf.h"
+
+#include "vulcan_bpf.h"
 
 char _license[] SEC("license") = "GPL";
 
@@ -22,6 +29,7 @@ const volatile size_t cache_size = 0;
 struct folio_metadata {
 	s64 freq;
 	bool in_main;
+	struct vulcan_folio_metadata vulcan;
 };
 
 struct ghost_entry {
@@ -51,6 +59,13 @@ static u64 small_list;
  * portable name available to userspace. */
 __s64 small_list_size = 0;
 __s64 main_list_size = 0;
+
+// Per-folio vulcan_bpf listener config: track recency via interval
+// MinMax + EWMA, layered alongside the freq/in_main admission state.
+static const struct vulcan_folio_config folio_cfg = {
+	.listener_mask = VULCAN_LISTENER_MINMAX | VULCAN_LISTENER_EWMA,
+	.ewma_alpha = 200,
+};
 
 static inline bool is_folio_relevant(struct folio *folio) {
 	if (!folio || !folio->mapping || !folio->mapping->host)
@@ -218,6 +233,11 @@ void BPF_STRUCT_OPS(evo_policy_folio_accessed, struct folio *folio) {
 
 	if (__sync_add_and_fetch(&data->freq, 1) > 3)
 		data->freq = 3;
+
+	vulcan_folio_on_access(&data->vulcan, bpf_ktime_get_ns(),
+			       BPF_CORE_READ(folio, _refcount.counter),
+			       BPF_CORE_READ(folio, _mapcount.counter),
+			       &folio_cfg);
 }
 
 void BPF_STRUCT_OPS(evo_policy_folio_evicted, struct folio *folio) {
@@ -248,7 +268,15 @@ void BPF_STRUCT_OPS(evo_policy_folio_added, struct folio *folio) {
 		return;
 
 	u64 key = (u64)folio;
-	struct folio_metadata new_meta = { .freq = 0 };
+	/* size_pages=1 (see cache_ext_lib.bpf.h folio_nr_pages); is_anonymous=0
+	 * (watched folios are file-backed, Fatal Pitfall B); class_id=0/inert
+	 * this experiment; client_tag=0 unused by this seed's logic. */
+	struct folio_metadata new_meta = {
+		.freq = 0,
+		.vulcan = vulcan_folio_init(bpf_ktime_get_ns(), /*size_pages=*/1,
+					    /*is_anonymous=*/0, /*class_id=*/0,
+					    /*client_tag=*/0),
+	};
 
 	u64 list_to_add;
 	if (folio_in_ghost(folio)) {
@@ -445,7 +473,7 @@ int main(int argc, char **argv) {
 		goto cleanup;
 	}
 
-	printf("evo_policy running. Press Ctrl+C to exit...\n");
+	printf("evo_policy (Vulcan S3-FIFO) running. Press Ctrl+C to exit...\n");
 	while (!exiting)
 		sleep(1);
 
@@ -455,6 +483,7 @@ int main(int argc, char **argv) {
 	 * cache_size is in rodata. Zero per-access overhead — runs once. */
 	{
 		FILE *m = evo_metrics_open();
+		evo_dump_str(m, "policy_name", "vulcan_s3_fifo");
 		evo_dump_u64(m, "cache_size_pages",     skel->rodata->cache_size);
 		evo_dump_s64(m, "small_list_size_exit", skel->bss->small_list_size);
 		evo_dump_s64(m, "main_list_size_exit",  skel->bss->main_list_size);
