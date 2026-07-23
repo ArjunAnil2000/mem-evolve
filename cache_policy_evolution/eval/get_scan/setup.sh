@@ -65,6 +65,20 @@ do_check() {
 }
 
 do_setup() {
+    echo "[get_scan] checking base build toolchain..."
+    if ! command -v cmake >/dev/null || ! dpkg -s libsnappy-dev >/dev/null 2>&1 \
+         || ! command -v zstd >/dev/null || ! command -v bpftool >/dev/null; then
+        # Mirrors start_workers.sh's --install-bench apt list. bpftool
+        # isn't in that list (it's a cache_ext kernel-build artifact,
+        # normally already present) — check but don't try to apt-install
+        # it here if missing; that means install_kernel.sh hasn't run.
+        command -v bpftool >/dev/null || echo "[get_scan] WARNING: bpftool missing — was install_kernel.sh run on this host?"
+        sudo -n apt-get update -qq
+        sudo -n apt-get install -y -qq \
+            build-essential cmake unzip libsnappy-dev pkg-config wget git zstd
+        echo "[get_scan] base toolchain installed"
+    fi
+
     echo "[get_scan] checking shared native deps (yaml-cpp, LevelDB fork)..."
     if [[ ! -f /usr/local/include/yaml-cpp/yaml.h ]]; then
         cd /tmp
