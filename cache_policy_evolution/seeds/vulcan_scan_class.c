@@ -4,12 +4,26 @@
 // EVOLVE-BLOCK-START
 // vulcan_scan_class: single-list scan-resistant LRU (promote to tail only
 // on re-access, mirroring vulcan_scan_resist / cache_ext_get_scan), plus a
-// vulcan_bpf class-level layer that buckets folios by the PID that
-// inserted them (vulcan_class_from_pid) and tracks each PID-bucket's
-// access-interval EWMA and live population. A class that stays large with
-// mostly single-touch folios looks scan-like — the whole class gets
-// evicted more aggressively, not just the individual cold folio, which is
-// the point of tracking at the class tier instead of only per-folio.
+// vulcan_bpf class-level layer with TWO NAMED classes — CLASS_GENERAL and
+// CLASS_SCAN — derived from ground-truth scan-thread identity, not a hash.
+//
+// scan_pids is a BPF map REUSED from the benchmark harness (see
+// eval/get_scan/run_with_policy.sh): the harness creates+pins an empty
+// map at /sys/fs/bpf/cache_ext/scan_pids before this policy's loader even
+// starts, independent of which policy is attached (every seed in this
+// run sees the identical environment). My-YCSB's leveldb-scan benchmark
+// writes its single dedicated scan thread's TID into that map on its
+// first scan op. This seed's loader attaches to that SAME map via
+// bpf_obj_get()+bpf_map__reuse_fd() (see USERSPACE LOADER section) rather
+// than creating its own — is_scanning_tid() below is a live read of it,
+// exactly mirroring cache_ext/policies/cache_ext_get_scan.bpf.c's
+// is_scanning_pid(). class_id is a snapshot of that check taken at
+// folio_added (insertion-time attribution, not lifetime attribution).
+//
+// A class whose population grows large is genuinely the scan thread's
+// traffic (ground truth, not a guess) — evicting it aggressively once
+// large enough is the whole point of tracking at the class tier instead
+// of only per-folio.
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
@@ -26,19 +40,32 @@
 #define CF_ACCESS_INTERVAL 0
 
 #define VULCAN_NUM_CLASS_FEATURES 1
-// Generic PID-hash buckets, not named classes — see vulcan_class_from_pid.
-// Kept small: vulcan_class_top_by_* scans this bound via loop unrolling.
-#define VULCAN_MAX_CLASSES 16
+// Two NAMED, ground-truth classes — ordinary traffic vs. the one
+// dedicated scan thread's traffic. Not a hash bucket count.
+#define VULCAN_MAX_CLASSES 2
+#define CLASS_GENERAL 0
+#define CLASS_SCAN    1
 
 #include "vulcan_class.h"
 
 char _license[] SEC("license") = "GPL";
 
-// A class whose population exceeds this AND whose member folios are
-// mostly single-touch is treated as scan-like.
+// scan_pids: key=TID (int), value=bool. Declared here so the BPF object
+// has a matching map slot for the loader to reuse-fd onto; NOT created
+// fresh at load time when reuse succeeds (see USERSPACE LOADER section).
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, int);
+	__type(value, bool);
+	__uint(max_entries, 1024);
+} scan_pids SEC(".maps");
+
+// Once CLASS_SCAN's population reaches this, evict its folios
+// aggressively even if re-touched — ground truth, so no ranking/guessing
+// needed to decide which class is "the scan class."
 #define SCAN_CLASS_MIN_POPULATION 64
-// A class this idle (no touches in this long) has its stats reset before
-// being trusted again — guards against PID reuse.
+// If CLASS_SCAN hasn't been fed in this long, don't trust its stats yet
+// (e.g. harness restarted the map, or the scan thread hasn't run yet).
 #define CLASS_STALE_TTL_NS (30ULL * 1000 * 1000 * 1000)
 
 static u64 main_list;
@@ -63,8 +90,8 @@ static const struct vulcan_folio_config folio_cfg = {
 };
 
 // Class-level listener config: EWMA of inter-access interval within a
-// PID-bucket, used to tell "actively reused bucket" from "one-shot scan
-// bucket" apart from the per-folio signal alone.
+// class, used to tell "actively reused" apart from "one-shot scan" beyond
+// the per-folio signal alone.
 static const struct vulcan_feature_config class_cfg[VULCAN_NUM_CLASS_FEATURES] = {
 	[CF_ACCESS_INTERVAL] = {
 		.listener_mask = VULCAN_LISTENER_EWMA,
@@ -81,6 +108,17 @@ static inline bool is_folio_relevant(struct folio *folio) {
 static inline struct folio_metadata *get_folio_metadata(struct folio *folio) {
 	u64 key = (u64)folio;
 	return bpf_map_lookup_elem(&folio_metadata_map, &key);
+}
+
+// Ground-truth check: is the CURRENT thread the benchmark's dedicated
+// scan thread? Mirrors cache_ext_get_scan.bpf.c's is_scanning_pid()
+// exactly (same map shape, same TID-not-PID lookup — the lower 32 bits
+// of bpf_get_current_pid_tgid() are the thread id in kernel terminology).
+static inline bool is_scanning_tid(void) {
+	__u64 pid_tgid = bpf_get_current_pid_tgid();
+	int tid = (int)(pid_tgid & 0xFFFFFFFF);
+	bool *ret = bpf_map_lookup_elem(&scan_pids, &tid);
+	return ret != NULL;
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(evo_policy_init, struct mem_cgroup *memcg)
@@ -110,19 +148,17 @@ static int evict_cb(int idx, struct cache_ext_list_node *a)
 	if (data->vulcan.access_count <= 1)
 		return CACHE_EXT_EVICT_NODE;
 
-	// Class-level check: if this folio's PID-bucket is currently the
-	// biggest AND still large enough to look scan-like, evict even a
-	// re-touched folio from it — one PID hammering many distinct pages
-	// can re-touch a handful incidentally without being a real
-	// working-set.
+	// Class-level check: this folio was inserted by the ground-truth scan
+	// thread AND that class has grown large enough to be confidently
+	// "the scan" (not just a couple of incidental re-touches) — evict it
+	// even though it was re-touched. No ranking/guessing needed: we KNOW
+	// which class is the scan thread's traffic, ground truth via
+	// scan_pids, not inferred from which class happens to be biggest.
 	u64 now = bpf_ktime_get_ns();
-	if (!vulcan_class_is_stale(data->class_id, now, CLASS_STALE_TTL_NS)) {
-		u32 biggest_pop;
-		u32 biggest_class = vulcan_class_top_by_count(&biggest_pop);
-		if (data->class_id == biggest_class &&
-		    biggest_pop >= SCAN_CLASS_MIN_POPULATION)
-			return CACHE_EXT_EVICT_NODE;
-	}
+	if (data->class_id == CLASS_SCAN &&
+	    !vulcan_class_is_stale(CLASS_SCAN, now, CLASS_STALE_TTL_NS) &&
+	    vulcan_get_class_count(CLASS_SCAN) >= SCAN_CLASS_MIN_POPULATION)
+		return CACHE_EXT_EVICT_NODE;
 
 	if (idx < 200)
 		return CACHE_EXT_CONTINUE_ITER;
@@ -183,7 +219,7 @@ void BPF_STRUCT_OPS(evo_policy_folio_added, struct folio *folio) {
 
 	u64 key = (u64)folio;
 	u64 now = bpf_ktime_get_ns();
-	u32 class_id = vulcan_class_from_pid(VULCAN_MAX_CLASSES);
+	u32 class_id = is_scanning_tid() ? CLASS_SCAN : CLASS_GENERAL;
 
 	/* size_pages=1 (see cache_ext_lib.bpf.h folio_nr_pages); is_anonymous=0
 	 * (watched folios are file-backed, Fatal Pitfall B); client_tag=0
@@ -317,6 +353,7 @@ int main(int argc, char **argv) {
 	char watch_dir_path[PATH_MAX];
 	int cgroup_fd = -1;
 	int ret = 1;
+	int scan_pids_attached = 0;
 
 	libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
 
@@ -350,6 +387,33 @@ int main(int argc, char **argv) {
 	watch_dir_path_len_map(skel) = strlen(watch_dir_path);
 	strcpy(watch_dir_path_map(skel), watch_dir_path);
 
+	/* Attach our scan_pids map slot to the harness-owned pinned map
+	 * (see eval/get_scan/run_with_policy.sh) instead of letting load()
+	 * create a fresh one. Must happen after open(), before load() —
+	 * reuse_fd tells the skeleton "don't create this map, use the
+	 * existing kernel object at this fd." Non-fatal if the pin doesn't
+	 * exist (e.g. running under a different benchmark, or
+	 * ENABLE_BPF_SCAN_MAP disabled): the skeleton falls back to
+	 * creating its own empty scan_pids, is_scanning_tid() always
+	 * returns false, every folio is CLASS_GENERAL — degrades cleanly
+	 * rather than failing to load. */
+	{
+		int scan_pids_fd = bpf_obj_get("/sys/fs/bpf/cache_ext/scan_pids");
+		if (scan_pids_fd >= 0) {
+			if (bpf_map__reuse_fd(skel->maps.scan_pids, scan_pids_fd)) {
+				perror("Failed to reuse scan_pids map fd");
+				close(scan_pids_fd);
+				goto cleanup;
+			}
+			close(scan_pids_fd);
+			scan_pids_attached = 1;
+			fprintf(stderr, "vulcan_scan_class: attached to harness scan_pids map\n");
+		} else {
+			fprintf(stderr, "vulcan_scan_class: no scan_pids pin found — "
+					"running with every folio as CLASS_GENERAL\n");
+		}
+	}
+
 	if (evo_policy_bpf__load(skel)) {
 		perror("Failed to load BPF skeleton");
 		goto cleanup;
@@ -378,6 +442,7 @@ int main(int argc, char **argv) {
 	{
 		FILE *m = evo_metrics_open();
 		evo_dump_str(m, "policy_name", "vulcan_scan_class");
+		evo_dump_u64(m, "scan_pids_attached", scan_pids_attached);
 		evo_metrics_close(m);
 	}
 	ret = 0;
