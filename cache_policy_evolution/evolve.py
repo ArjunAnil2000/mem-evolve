@@ -63,9 +63,10 @@ def load_config(toml_path: str, args: argparse.Namespace) -> Dict[str, Any]:
 
     cfg.setdefault("llm", {})
     cfg["llm"].setdefault("mutator", {})
-    cfg["llm"]["mutator"].setdefault("model", "claude-sonnet-4-6")
-    cfg["llm"]["mutator"].setdefault("provider", "anthropic")
-    cfg["llm"]["mutator"].setdefault("api_key_env", "ANTHROPIC_API_KEY")
+    cfg["llm"]["mutator"].setdefault("model", "claude-sonnet")
+    cfg["llm"]["mutator"].setdefault("provider", "openai")
+    cfg["llm"]["mutator"].setdefault("api_base", "http://localhost:4000/v1")
+    cfg["llm"]["mutator"].setdefault("api_key_env", "LITELLM_MASTER_KEY")
     cfg["llm"]["mutator"].setdefault("temperature", 0.85)
     # planner is optional; falls back to mutator inside loop.py
 
