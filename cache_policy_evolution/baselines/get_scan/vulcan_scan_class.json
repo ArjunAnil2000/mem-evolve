@@ -1,0 +1,88 @@
+{
+  "ok": true,
+  "error": "",
+  "score": -2596338572.9909873,
+  "wallclock_sec": 38.96312188899901,
+  "probes": {
+    "wallclock": {
+      "name": "wallclock",
+      "value": 38.96394954700372,
+      "unit": "seconds",
+      "direction": "minimize",
+      "summary": "38.96s",
+      "details": {
+        "seconds": 38.96394954700372
+      }
+    },
+    "cgroup_iostat": {
+      "name": "cgroup_iostat",
+      "value": 5192056832.0,
+      "unit": "bytes",
+      "direction": "minimize",
+      "summary": "rbytes=4951.5MiB wbytes=0.0MiB rios=445360",
+      "details": {
+        "rbytes": 5192056832,
+        "wbytes": 45056,
+        "rios": 445360
+      }
+    },
+    "cgroup_memstat": {
+      "name": "cgroup_memstat",
+      "value": 1240589.0,
+      "unit": "refaults",
+      "direction": "minimize",
+      "summary": "refault_file=1240589 pgmajfault=29 pgactivate=162121 resident_file=20MiB",
+      "details": {
+        "delta": {
+          "workingset_refault_file": 1240589,
+          "workingset_activate_file": 389105,
+          "workingset_restore_file": 113731,
+          "pgfault": 33620,
+          "pgmajfault": 29,
+          "pgactivate": 162121,
+          "pgdeactivate": 425798,
+          "pgscan": 1032051,
+          "pgsteal": 1019497
+        },
+        "final": {
+          "file": 21991424,
+          "file_mapped": 0,
+          "file_dirty": 4096
+        }
+      }
+    },
+    "policy_counters": {
+      "name": "policy_counters",
+      "value": 0.0,
+      "unit": "",
+      "direction": "record",
+      "summary": "policy_name=vulcan_scan_class scan_pids_attached=1",
+      "details": {
+        "policy_name": "vulcan_scan_class",
+        "scan_pids_attached": 1
+      }
+    }
+  },
+  "stdout_tail": "[get_scan] scan_pids map pinned at /sys/fs/bpf/cache_ext/scan_pids\n[get_scan] Reusing cached DB at /mydata/evo_get_scan_db\n[get_scan] Cgroup: cache_ext_baseline max=64MB\n[get_scan] Policy loader running (PID 19136)\n[get_scan] Running GET-SCAN (30s, 4 threads, scan=0.05, ENABLE_BPF_SCAN_MAP=1)...\n[get_scan] Throughput: 25526.44 ops/sec   READ p99=660133.47 ns   SCAN p99=3545741.25 ns   \u2192 /mydata/step3_results/exp-3__vulcan_scan_class/results.json\n[get_scan] Done.\n",
+  "stderr_tail": "",
+  "workload_results": {
+    "throughput_ops_per_sec": 25526.44,
+    "read_throughput_ops_per_sec": 24844.67,
+    "scan_throughput_ops_per_sec": 681.77,
+    "read_avg_latency_ns": 117299.96,
+    "read_p99_latency_ns": 660133.47,
+    "scan_p99_latency_ns": 3545741.25,
+    "config": {
+      "db_nr_entry": 500000,
+      "key_size": 16,
+      "value_size": 200,
+      "cache_limit_mb": 64,
+      "runtime_seconds": 30,
+      "threads": 4,
+      "scan_proportion": 0.05,
+      "scan_length": 500,
+      "enable_bpf_scan_map": "1"
+    }
+  },
+  "seed_path": "/mydata/evo_cache/cache_policy_evolution/seeds/vulcan_scan_class.c"
+}
