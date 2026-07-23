@@ -160,6 +160,18 @@ phase1_setup() {
     local host="$1"
     log "[$host] Phase 1: Clone repo + init submodules"
 
+    # Some CloudLab sites (e.g. wisc.cloudlab.us) block outbound plain HTTP
+    # (port 80) but allow HTTPS — apt's default sources.list/sources.list.d
+    # entries are all http://, which then hang/timeout on every apt-get call
+    # for the rest of provisioning (kernel build deps, python3.11, etc).
+    # Rewrite them to https:// up front so this only needs fixing once.
+    run_remote "$host" "
+        sudo sed -i 's#http://#https://#g' /etc/apt/sources.list &&
+        sudo sed -i 's#http://#https://#g' /etc/apt/sources.list.d/*.list 2>/dev/null || true &&
+        sudo apt-get update
+    " || { err "[$host] Failed to switch apt sources to https"; return 1; }
+    ok "[$host] apt sources switched to https"
+
     # Fix ownership — CloudLab mounts /mydata owned by root. Make it writable
     # by $SSH_USER so git clone + all downstream installs don't need sudo.
     run_remote "$host" "
