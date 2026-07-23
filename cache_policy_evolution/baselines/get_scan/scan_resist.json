@@ -1,0 +1,87 @@
+{
+  "ok": true,
+  "error": "",
+  "score": -2526739026.4912558,
+  "wallclock_sec": 38.9644072860101,
+  "probes": {
+    "wallclock": {
+      "name": "wallclock",
+      "value": 38.965022371994564,
+      "unit": "seconds",
+      "direction": "minimize",
+      "summary": "38.97s",
+      "details": {
+        "seconds": 38.965022371994564
+      }
+    },
+    "cgroup_iostat": {
+      "name": "cgroup_iostat",
+      "value": 5052874752.0,
+      "unit": "bytes",
+      "direction": "minimize",
+      "summary": "rbytes=4818.8MiB wbytes=0.0MiB rios=461437",
+      "details": {
+        "rbytes": 5052874752,
+        "wbytes": 45056,
+        "rios": 461437
+      }
+    },
+    "cgroup_memstat": {
+      "name": "cgroup_memstat",
+      "value": 1206563.0,
+      "unit": "refaults",
+      "direction": "minimize",
+      "summary": "refault_file=1206563 pgmajfault=79 pgactivate=144511 resident_file=16MiB",
+      "details": {
+        "delta": {
+          "workingset_refault_file": 1206563,
+          "workingset_activate_file": 542484,
+          "workingset_restore_file": 84348,
+          "pgfault": 33086,
+          "pgmajfault": 79,
+          "pgactivate": 144511,
+          "pgdeactivate": 171309,
+          "pgscan": 199784,
+          "pgsteal": 195788
+        },
+        "final": {
+          "file": 17285120,
+          "file_mapped": 0,
+          "file_dirty": 8192
+        }
+      }
+    },
+    "policy_counters": {
+      "name": "policy_counters",
+      "value": 0.0,
+      "unit": "",
+      "direction": "record",
+      "summary": "policy_name=scan_resist",
+      "details": {
+        "policy_name": "scan_resist"
+      }
+    }
+  },
+  "stdout_tail": "[get_scan] scan_pids map pinned at /sys/fs/bpf/cache_ext/scan_pids\n[get_scan] Reusing cached DB at /mydata/evo_get_scan_db\n[get_scan] Cgroup: cache_ext_baseline max=64MB\n[get_scan] Policy loader running (PID 16531)\n[get_scan] Running GET-SCAN (30s, 4 threads, scan=0.05, ENABLE_BPF_SCAN_MAP=1)...\n[get_scan] Throughput: 27371.16 ops/sec   READ p99=640197.14 ns   SCAN p99=3743339.61 ns   \u2192 /mydata/step3_results/exp-1__scan_resist/results.json\n[get_scan] Done.\n",
+  "stderr_tail": "",
+  "workload_results": {
+    "throughput_ops_per_sec": 27371.16,
+    "read_throughput_ops_per_sec": 26706.1,
+    "scan_throughput_ops_per_sec": 665.06,
+    "read_avg_latency_ns": 108811.98,
+    "read_p99_latency_ns": 640197.14,
+    "scan_p99_latency_ns": 3743339.61,
+    "config": {
+      "db_nr_entry": 500000,
+      "key_size": 16,
+      "value_size": 200,
+      "cache_limit_mb": 64,
+      "runtime_seconds": 30,
+      "threads": 4,
+      "scan_proportion": 0.05,
+      "scan_length": 500,
+      "enable_bpf_scan_map": "1"
+    }
+  },
+  "seed_path": "/mydata/evo_cache/cache_policy_evolution/seeds/scan_resist.c"
+}
