@@ -10,7 +10,12 @@
 # BPF-map hook.
 #
 # Required env (set by evolve.py via the evaluator):
-#   POLICY_BINARY    pre-compiled evo_policy.out (omit for baseline runs)
+#   POLICY_BINARY    pre-compiled policy loader (omit for baseline runs).
+#                    Accepts both mem-evolve-generated seed loaders
+#                    (-w/-s/-c) and cache_ext's own reference-policy
+#                    loaders (-w/-c only, no cgroup_size) — see
+#                    start_policy_loader() below, which tries the
+#                    3-flag form first and falls back on "invalid option".
 #   JOB_DIR          scratch dir; results.json written here
 #   CACHE_EXT_CGROUP cgroup path (created if missing)
 #
@@ -217,20 +222,44 @@ sleep 1
 
 # Optional policy load. The scan_pids map (above) already exists
 # independent of this, so no ordering dependency between the two anymore.
+#
+# Loader CLI compat: mem-evolve-generated seed loaders (evo_policy.c) all
+# take -w/-s/-c (watch_dir/cgroup_size/cgroup_path). cache_ext's OWN
+# reference policies (cache_ext/policies/*.c, e.g. cache_ext_fifo.c)
+# predate that convention and only take -w/-c — no cgroup_size flag at
+# all. Try the full 3-flag form first; if argp rejects it (a genuine
+# "invalid option" from getopt, not some other startup failure), retry
+# with just -w/-c so both loader families work against this script.
+start_policy_loader() {
+    local extra_args=(-w "$DB_DIR" -s "$cgroup_bytes" -c "$CGROUP_PATH")
+    "$POLICY_BINARY" "${extra_args[@]}" >"$LOADER_LOG" 2>&1 &
+    LOADER_PID=$!
+    sleep 1
+    if kill -0 "$LOADER_PID" 2>/dev/null; then
+        return 0
+    fi
+
+    if grep -q "invalid option" "$LOADER_LOG" 2>/dev/null; then
+        log "Loader rejected -s (cgroup_size) — retrying with -w/-c only" \
+            "(cache_ext reference-policy CLI, no cgroup_size flag)"
+        extra_args=(-w "$DB_DIR" -c "$CGROUP_PATH")
+        "$POLICY_BINARY" "${extra_args[@]}" >"$LOADER_LOG" 2>&1 &
+        LOADER_PID=$!
+        sleep 1
+        if kill -0 "$LOADER_PID" 2>/dev/null; then
+            return 0
+        fi
+    fi
+
+    cat "$LOADER_LOG" >&2 || true
+    err "policy loader died immediately (tried -w/-s/-c and -w/-c)"
+}
+
 if [[ -n "$POLICY_BINARY" ]]; then
     [[ -x "$POLICY_BINARY" ]] || err "Not executable: $POLICY_BINARY"
     echo 'n' | tee /sys/kernel/mm/lru_gen/enabled > /dev/null 2>&1 || true
     cgroup_bytes=$((CACHE_LIMIT_MB * 1024 * 1024))
-    "$POLICY_BINARY" \
-        -w "$DB_DIR" \
-        -s "$cgroup_bytes" \
-        -c "$CGROUP_PATH" >"$LOADER_LOG" 2>&1 &
-    LOADER_PID=$!
-    sleep 1
-    if ! kill -0 "$LOADER_PID" 2>/dev/null; then
-        cat "$LOADER_LOG" >&2 || true
-        err "policy loader died immediately"
-    fi
+    start_policy_loader
     log "Policy loader running (PID $LOADER_PID)"
 else
     log "No POLICY_BINARY set — running baseline (calibration mode)"
