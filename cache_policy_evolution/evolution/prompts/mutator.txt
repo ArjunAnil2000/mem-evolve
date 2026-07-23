@@ -13,23 +13,46 @@ never hand-roll your own MinMax/EWMA/Average/RollingWindow tracking when
 vulcan_bpf already provides it — use the listener primitives for any such
 signal instead.
 
+The features tracked in this run — what raw signal is observed, at which
+tier (per-folio/class/global), and from which struct_ops call site it is
+fed — are fixed by the seed and are NOT yours to change. Your only lever
+is which listeners (MinMax, EWMA, Average, RollingWindow) are attached to
+an already-existing feature, and how you combine their accessor outputs
+into the eviction decision. Adding a listener to a feature is cheap:
+flip a bit in `listener_mask`, maybe set `ewma_alpha`/`rw_size`, read the
+new accessor. That is the default move this run wants from you — reach
+for it before reaching for anything structural.
+
 ============================================================================
 START SMALL, THEN ITERATE
 ============================================================================
 
-The reliable path to a better score is:
+Mutations are cheapest, and most likely to survive, when they stay inside
+the fixed feature set and only change which listeners are attached or how
+their outputs are combined. Reach for structural changes only after that
+budget is exhausted:
 
-  1. Start with the smallest possible change from the seed (5–20 lines).
-  2. Verify it still matches the seed's structural invariants.
-  3. Only add data structures / maps / extra lists after a simple change
-     has been proven to move the score.
+  Tier 0 — toggle a listener flag on an existing feature's config (add or
+           remove VULCAN_LISTENER_MINMAX/EWMA/AVG/RW), read the new
+           accessor, wire it into the decision logic. Cheapest possible
+           change — a few lines.
+  Tier 1 — retune an already-active listener's parameters (ewma_alpha,
+           rw_size) without changing the mask.
+  Tier 2 — change how already-available accessor outputs are combined
+           into the score/threshold (blend two listeners on the same
+           feature, swap which listener's output gates the eviction
+           decision, reweight an existing formula).
+  Tier 3 — new lists / metadata maps / eviction phases (2Q, ARC, CLOCK,
+           S3-FIFO, multi-tier). Only after a Tier 0–2 change has been
+           proven to move the score. This is the expensive tier: it
+           almost always times out or regresses when attempted first.
 
-Ambitious rewrites (2Q, ARC, CLOCK, S3-FIFO, multi-tier) that introduce
-new lists, metadata maps, and eviction phases in one shot almost always
-time out or regress. If you're about to write >100 lines of new BPF, stop
-and ask: "is there a 10-line change to the seed that captures the core
-idea first?" The answer is almost always yes — and that version will
-actually run.
+If you're about to write >100 lines of new BPF, stop and ask: "is there a
+Tier 0–2 change that captures the core idea first?" The answer is almost
+always yes — and that version will actually run.
+
+Name the tier of your change (0/1/2/3) in the 1–2 sentence justification
+required by OUTPUT FORMAT below.
 
 ============================================================================
 FATAL PITFALLS (READ BEFORE WRITING ANY CODE)
@@ -77,11 +100,18 @@ F. BPF globals the loader reads via `skel->bss->NAME` MUST be declared as
 
 G. Never remove or bypass the vulcan_bpf scaffolding (the includes, the
    `folio_metadata`/`vulcan` struct embedding, the `vulcan_*` calls in
-   folio_added/accessed/evicted). If you want a new signal, add it as a
-   vulcan_bpf listener (a new per-folio config flag, or a new global
-   feature id) rather than writing your own tracking next to it. A
-   mutation that drops vulcan_bpf usage is out of scope for this run,
-   even if it would score well.
+   folio_added/accessed/evicted). A mutation that drops vulcan_bpf usage
+   is out of scope for this run, even if it would score well.
+
+H. Do not add, remove, or redefine a feature. That means: no new enum
+   members in the global-feature enum, no change to
+   `VULCAN_NUM_GLOBAL_FEATURES`, no new fields in `folio_metadata`, and no
+   new call site for `vulcan_folio_on_access` / `vulcan_update_feature`
+   (they stay exactly where the seed puts them). If you want a new
+   signal, get it by attaching a different listener to an existing
+   feature, not by inventing a new one. A diff that adds a feature is out
+   of scope even if it would score well — find an equivalent move inside
+   the existing features instead.
 
 ============================================================================
 POLICY METRICS — FEEDBACK CONVENTION (zero per-access overhead)
@@ -136,12 +166,10 @@ your score. Throughput is the score.
 VULCAN_BPF ACCESSORS
 ============================================================================
 
-Every seed in this run includes "vulcan_bpf.h" / "vulcan_feature.h" and you
-keep using them throughout — this is your only toolkit for tracking
-recency/frequency and any other signal you want the eviction decision to
-use. Any global feature must be computable from data already available
-inside folio_added/accessed/evicted/evict_folios — feed vulcan features
-only from struct_ops handlers, nothing else.
+Every seed in this run includes "vulcan_bpf.h" / "vulcan_feature.h" — this
+is your only toolkit for reading the fixed set of features this run
+tracks. You don't define which signals exist (see FATAL PITFALL H); you
+choose which listeners observe them and how you use the readback.
 
 Per-folio (embedded in your own folio-keyed map value, e.g.
 `struct folio_metadata { struct vulcan_folio_metadata vulcan; };`):
@@ -176,6 +204,33 @@ Global (cache-internal only — fed exclusively from struct_ops handlers):
 Listener kinds available in this build: MinMax, EWMA, Average, Rolling
 Window. RollingPercentile and RollingCount are NOT ported to vulcan_bpf —
 do not reference them, they don't exist here.
+
+Choosing which listener(s) to attach to a feature:
+
+  | You want...                              | Listener             |
+  |-------------------------------------------|----------------------|
+  | smallest/largest value ever seen          | MinMax               |
+  | a trend weighted toward recent samples    | EWMA (set alpha)     |
+  | the exact all-time average                | Average              |
+  | last-K samples / a short-term rate         | RollingWindow (size) |
+
+Listeners on the same feature are OR'd into the same config struct —
+prefer combining listeners on an existing feature over anything else.
+Example: the seed's `GF_EVICT_INTERVAL` feature (fed only from
+folio_evicted) already carries EWMA. Adding MinMax to the same feature is
+a Tier 0 change — the feature itself is untouched:
+
+    static const struct vulcan_feature_config gf_evict_interval_cfg = {
+        .listener_mask = VULCAN_LISTENER_EWMA | VULCAN_LISTENER_MINMAX,
+        .ewma_alpha = 150,
+    };
+    ...
+    s64 pressure_trend = vulcan_get_ewma(GF_EVICT_INTERVAL);
+    s64 pressure_floor  = vulcan_get_min(GF_EVICT_INTERVAL);
+    s64 pressure_ceil   = vulcan_get_max(GF_EVICT_INTERVAL);
+
+Now the decision logic has a trend AND a range to combine, without a new
+feature, new map, or new call site.
 
 Counter-overhead note (reuses the cost model above): vulcan's own update
 calls (`vulcan_folio_on_access`, `vulcan_update_feature`) are already
