@@ -2,24 +2,46 @@
 # setup_main_node.sh — provision the coordinator (main) node:
 #   1. fix /mydata ownership
 #   2. clone the repo (if not already)
-#   3. install Claude Code CLI via the official installer
-#   4. install Python deps for coordinator + claude_api proxy
-#   5. start the claude_api proxy in the background
+#   3. install Python deps for the coordinator
+#   4. install litellm[proxy] via pip and launch it against --litellm-config
+#   5. health-check the LiteLLM endpoint the coordinator will use
 #   6. drop you into an interactive SSH session on the host
+#
+# LLM calls go through a LiteLLM proxy (OpenAI-compatible) — see
+# cache_policy_evolution/*.toml's [llm.mutator]/[llm.planner] `api_base`.
+# Steps 3+ assume the host already has the cache_ext toolchain (clang-14,
+# bpftool, vmlinux.h) from setup_cloudlab.sh — this script does not build
+# or install the custom kernel.
 #
 # Usage:
 #   ./setup_main_node.sh <host>
+#   AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... ./setup_main_node.sh <host>
 #
 # Options:
-#   --pat <token>       GitHub PAT. Optional — only needed if the repo
-#                       being cloned is private. The default repo
-#                       (ArjunAnil2000/mem-evolve) is public, so a plain
-#                       anonymous clone is used when --pat is omitted.
-#   --user <user>       SSH user              (default: aanil3)
-#   --ssh-key <path>    SSH key               (default: ~/.ssh/id_ed25519)
-#   --base-dir <path>   Install root          (default: /mydata)
-#   --port <port>       claude_api port       (default: 8082)
-#   --no-shell          Skip the final interactive ssh
+#   --pat <token>          GitHub PAT. Optional — only needed if the repo
+#                          being cloned is private. The default repo
+#                          (ArjunAnil2000/mem-evolve) is public, so a plain
+#                          anonymous clone is used when --pat is omitted.
+#   --user <user>          SSH user              (default: aanil3)
+#   --ssh-key <path>       SSH key               (default: ~/.ssh/id_ed25519)
+#   --base-dir <path>      Install root          (default: /mydata)
+#   --litellm-config <path> Local path to a litellm proxy config YAML to
+#                          copy to the host and launch. Skips the
+#                          install+launch step if omitted.
+#   --litellm-port <port>  Port for the litellm proxy to listen on
+#                          (default: 4000)
+#   --litellm-url <url>    LiteLLM base URL to health-check from the remote
+#                          host (default: http://localhost:<litellm-port>/v1)
+#   --skip-litellm         Skip installing/launching litellm entirely —
+#                          just health-check whatever's already at
+#                          --litellm-url
+#   --no-shell             Skip the final interactive ssh
+#
+###########################################################################################
+# AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY must be exported in the calling
+# shell if --litellm-config is given — they're forwarded to the remote
+# litellm process's environment, never written to disk or to this script.
+###########################################################################################
 
 set -euo pipefail
 
@@ -27,7 +49,10 @@ PAT=""
 SSH_USER="aanil3"
 SSH_KEY="$HOME/.ssh/id_ed25519"
 BASE_DIR="/mydata"
-PORT="8082"
+LITELLM_CONFIG=""
+LITELLM_PORT="4000"
+LITELLM_URL=""
+SKIP_LITELLM=false
 NO_SHELL=false
 HOST=""
 
@@ -42,20 +67,33 @@ while [[ $# -gt 0 ]]; do
         --user)     SSH_USER="$2"; shift 2 ;;
         --ssh-key)  SSH_KEY="$2"; shift 2 ;;
         --base-dir) BASE_DIR="$2"; shift 2 ;;
-        --port)     PORT="$2"; shift 2 ;;
+        --litellm-config) LITELLM_CONFIG="$2"; shift 2 ;;
+        --litellm-port) LITELLM_PORT="$2"; shift 2 ;;
+        --litellm-url) LITELLM_URL="$2"; shift 2 ;;
+        --skip-litellm) SKIP_LITELLM=true; shift ;;
         --no-shell) NO_SHELL=true; shift ;;
-        -h|--help)  sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)  sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*)         err "unknown flag: $1"; exit 1 ;;
         *)          HOST="$1"; shift ;;
     esac
 done
 
 [[ -z "$HOST" ]] && { err "host required"; exit 1; }
+[[ -z "$LITELLM_URL" ]] && LITELLM_URL="http://localhost:${LITELLM_PORT}/v1"
+
+if [[ -n "$LITELLM_CONFIG" && ! -f "$LITELLM_CONFIG" ]]; then
+    err "--litellm-config file not found: $LITELLM_CONFIG"
+    exit 1
+fi
+if [[ -n "$LITELLM_CONFIG" ]] && ! $SKIP_LITELLM; then
+    if [[ -z "${AWS_ACCESS_KEY_ID:-}" || -z "${AWS_SECRET_ACCESS_KEY:-}" ]]; then
+        err "AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY must be exported to launch litellm (or pass --skip-litellm)"
+        exit 1
+    fi
+fi
 
 SSH_OPTS=(-o StrictHostKeyChecking=no -o ConnectTimeout=10 -i "$SSH_KEY")
 REPO_DIR="${BASE_DIR}/evo_cache"
-PROXY_LOG="/tmp/claude_api.log"
-PROXY_PID="/tmp/claude_api.pid"
 
 run_remote() { ssh "${SSH_OPTS[@]}" "${SSH_USER}@${HOST}" "$1"; }
 
@@ -80,55 +118,65 @@ else
 fi
 ok   "[$HOST] repo ready at ${REPO_DIR}"
 
-# 3) Claude Code CLI (official installer)
-log "[$HOST] installing Claude Code CLI"
-run_remote "bash -lc '
-    set -e
-    if ! command -v claude >/dev/null 2>&1; then
-        curl -fsSL https://claude.ai/install.sh | bash
-    fi
-    export PATH=\"\$HOME/.local/bin:\$PATH\"
-    claude --version
-'"
-ok   "[$HOST] Claude Code installed"
-
-# 4) Python deps
+# 3) Python deps for the coordinator. python3.11 (not the distro default
+#    python3) — matches what setup_cloudlab.sh installs via deadsnakes and
+#    what evolve.py's tomllib-based config loading expects.
 log "[$HOST] installing Python deps"
 run_remote "
     cd ${REPO_DIR} &&
-    python3 -m pip install --user -r cache_policy_evolution/requirements.txt &&
-    python3 -m pip install --user -r claude_api/requirements.txt
+    python3.11 -m pip install --user -r cache_policy_evolution/requirements.txt
 "
 ok   "[$HOST] Python deps installed"
 
-# 5) Start claude_api in background
-log "[$HOST] starting claude_api proxy on :${PORT}"
-run_remote "
-    pkill -f 'claude_api/server.py' 2>/dev/null || true
-    sleep 0.5
-    cd ${REPO_DIR}/claude_api || exit 1
-    export PATH=\"\$HOME/.local/bin:\$PATH\"
-    : > ${PROXY_LOG}
-    PORT=${PORT} setsid nohup python3 -u server.py >> ${PROXY_LOG} 2>&1 < /dev/null &
-    echo \$! > ${PROXY_PID}
-    disown -a 2>/dev/null || true
-"
+# 4) Install litellm[proxy] via pip and launch it. Docker is NOT used here —
+#    on a cache_ext custom kernel built via `make localmodconfig`, the
+#    netfilter/bridge modules Docker's default networking needs are
+#    typically missing (stripped because they weren't loaded when the
+#    kernel config was captured), and there's no straightforward fix short
+#    of rebuilding the kernel. A bare `pip install` avoids the whole
+#    problem. Skipped entirely if --litellm-config wasn't given.
+if [[ -n "$LITELLM_CONFIG" ]] && ! $SKIP_LITELLM; then
+    LITELLM_REMOTE_DIR="\$HOME/lite-llm-server"
+    log "[$HOST] installing litellm[proxy]"
+    run_remote "python3.11 -m pip install --user 'litellm[proxy]'" >/dev/null
+    ok   "[$HOST] litellm[proxy] installed"
 
-# Poll /health for up to ~20s
-HEALTHY=false
-for i in 1 2 3 4 5 6 7 8 9 10; do
-    sleep 2
-    if run_remote "curl -fs --max-time 3 http://localhost:${PORT}/health >/dev/null 2>&1"; then
-        HEALTHY=true
-        break
-    fi
-done
+    log "[$HOST] copying litellm config"
+    run_remote "mkdir -p ${LITELLM_REMOTE_DIR}"
+    # scp's SFTP transfer doesn't run a remote shell, so it can't expand
+    # $HOME in the destination path (unlike run_remote's ssh calls) — use a
+    # ~-relative path instead, which sftp resolves against the login home dir.
+    scp -q -o StrictHostKeyChecking=no -i "$SSH_KEY" \
+        "$LITELLM_CONFIG" "${SSH_USER}@${HOST}:~/lite-llm-server/litellm_config.yaml"
+    ok   "[$HOST] config copied to ${LITELLM_REMOTE_DIR}/litellm_config.yaml"
 
-if $HEALTHY; then
-    ok   "[$HOST] claude_api healthy on :${PORT}  (log: ${PROXY_LOG})"
+    log "[$HOST] launching litellm proxy on :${LITELLM_PORT}"
+    # pkill -f matches the FULL cmdline of every process, including the
+    # remote bash process running this very script (whose cmdline is the
+    # whole multi-line script text below, which itself contains the literal
+    # string being searched for) — that self-match killed the SSH session's
+    # own shell before it ever reached the nohup line. -x matches on the
+    # process name only (exact match), which sidesteps the self-match.
+    run_remote "
+        export PATH=\"\$HOME/.local/bin:\$PATH\"
+        export AWS_ACCESS_KEY_ID='${AWS_ACCESS_KEY_ID}'
+        export AWS_SECRET_ACCESS_KEY='${AWS_SECRET_ACCESS_KEY}'
+        cd ${LITELLM_REMOTE_DIR}
+        pkill -x litellm 2>/dev/null || true
+        sleep 1
+        nohup litellm --config litellm_config.yaml --port ${LITELLM_PORT} > litellm.log 2>&1 &
+        disown
+    "
+    sleep 3
+    ok   "[$HOST] litellm launched (log: ${LITELLM_REMOTE_DIR}/litellm.log — not a systemd service, won't survive reboot/crash)"
+fi
+
+# 5) Health-check the LiteLLM endpoint. Doesn't fail the provisioning run.
+log "[$HOST] checking LiteLLM at ${LITELLM_URL}"
+if run_remote "curl -fs --max-time 5 '${LITELLM_URL}/models' -o /dev/null -w '%{http_code}'" 2>/dev/null | grep -qE '^(200|401|403)$'; then
+    ok   "[$HOST] LiteLLM reachable at ${LITELLM_URL}"
 else
-    err  "[$HOST] claude_api did not come up — dumping last 40 lines of ${PROXY_LOG}:"
-    run_remote "tail -n 40 ${PROXY_LOG} 2>/dev/null || echo '(log empty or missing)'" >&2
+    err  "[$HOST] could not reach ${LITELLM_URL} — make sure your LiteLLM proxy is running there before starting evolution (use --litellm-url to point elsewhere, or --litellm-config to have this script launch one)"
 fi
 
 echo
@@ -136,17 +184,13 @@ ok "main node setup complete"
 cat <<EOF
 
 On the remote host you still need to:
-  1. Authenticate Claude Code once:
-       claude   # complete OAuth, then exit
-     (if claude --version already works but /v1/chat/completions fails, auth is the usual cause)
-  2. Run evolution:
+  1. Make sure a LiteLLM proxy is reachable at: ${LITELLM_URL}
+  2. Export the LiteLLM key referenced by your TOML's api_key_env
+     (default: LITELLM_MASTER_KEY), e.g.:
+       export LITELLM_MASTER_KEY=...
+  3. Run evolution:
        cd ${REPO_DIR}/cache_policy_evolution
-       export OPENAI_API_KEY=dummy
-       python3 evolve.py scan_thrash.toml
-
-Proxy logs:    ${PROXY_LOG}
-Proxy pid:     \$(cat ${PROXY_PID} 2>/dev/null)
-Stop proxy:    pkill -f claude_api/server.py
+       python3.11 evolve.py scan_thrash.toml
 
 EOF
 
