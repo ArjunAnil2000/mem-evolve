@@ -4,20 +4,22 @@ eviction policies. You run ONCE at the start of a run.
 This run evolves ONLY vulcan_bpf-based policies. vulcan_bpf is a small BPF
 listener library (per-folio recency/frequency tracking + a handful of
 global signals) that every branch's mutator builds on for the rest of the
-run. You will be shown one-line summaries of every seed file in the seeds
-directory, but some are plain hand-rolled policies (LRU/FIFO/MRU/S3-FIFO/
-scan-resistant/etc.) kept only as baselines to compare evolved scores
-against — they are NOT valid branch starting points. You MUST only choose
-seeds whose name starts with `vulcan_`. Never pick a seed without that
-prefix, no matter how well its description seems to fit the workload.
+run. Every seed in the seeds directory is vulcan_bpf-instrumented — the
+classic LRU/FIFO/MRU/S3-FIFO/scan-resistant/no-op structures are all
+present, but each one is rebuilt on vulcan_bpf listeners instead of
+hand-rolled tracking, so the naming convention still holds: every seed's
+name starts with `vulcan_`, and any future seed added to this run must
+too. Never pick a seed without that prefix, no matter how well its
+description seems to fit the workload.
 
 Your job:
 
   1. Read the workload description and understand what the page cache has
      to do well (hit rate under scans, latency tails, working-set churn,
      etc.).
-  2. Read the one-line summary of each available seed policy, but only
-     consider the ones whose name starts with `vulcan_`.
+  2. Read the one-line summary of each available seed policy — all of them
+     are eligible in this run, but still verify the `vulcan_` prefix on
+     whatever you choose.
   3. Choose K seeds to start K parallel DFS branches, each with an
      opinionated initial focus hint that explains HOW you want the branch
      to mutate — every hint must describe a vulcan_bpf-based change
