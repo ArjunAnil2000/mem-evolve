@@ -45,12 +45,17 @@ reveals when the scan thread displaces the hot GET set) without starving
 SCAN throughput entirely (a policy that simply never evicts scan pages
 until they're the only thing left just delays the same problem).
 
-Every seed in this run's seeds_dir works against this workload — the
-GET/SCAN traffic mix itself is real either way. A minority of seeds can
-additionally request ground-truth scan-thread classification via the
-$ENABLE_BPF_SCAN_MAP env var (see eval/get_scan/run_with_policy.sh) if
-they define and pin their own scan_pids BPF map; most seeds don't and
-don't need to.
+Every seed in this run's seeds_dir sees the identical benchmark
+environment, including the ground-truth scan-thread classification map
+(scan_pids) — the harness script itself creates and pins that map before
+any policy is even attached (see eval/get_scan/run_with_policy.sh), so its
+presence never depends on which seed is under test. Most seeds simply
+never look at it; a seed that wants the signal attaches to the same
+harness-owned map via bpf_obj_get()/bpf_map__reuse_fd() in its own loader
+rather than creating its own. This is deliberate: comparisons across
+seeds/experiments on this workload should isolate what a seed's design
+lets it DO with equally-available information, not which seed happened to
+be given access to it.
 """
 
 # Empty = run locally. Fill in one URL per worker daemon, e.g.:

@@ -36,23 +36,27 @@
 #   DB_DIR             DB location (default /mydata/evo_get_scan_db)
 #   YCSB_SCAN_DIR       My-YCSB(leveldb-scan) build dir
 #                       (default /mydata/evo_cache/cache_ext/My-YCSB-scan)
-#   ENABLE_BPF_SCAN_MAP opt-in ground-truth scan-thread classification via
-#                       the pinned scan_pids BPF map (default "0" — OFF).
-#                       See setup.sh's header comment for the mechanism.
-#                       DANGER: only set this to "1" if POLICY_BINARY is a
-#                       policy that itself defines and pins a scan_pids map
-#                       (BPF_MAP_TYPE_HASH, key=int, value=u8, pinned at
-#                       /sys/fs/bpf/cache_ext/scan_pids) BEFORE the
-#                       benchmark starts issuing scan ops. If nothing pins
-#                       that map, My-YCSB's bpf_obj_get() throws and the
-#                       whole benchmark process aborts. Every seed in this
-#                       run works fine with this left at "0" — the SCAN/GET
-#                       op mix itself is still real traffic either way; "1"
-#                       only adds the extra ground-truth signal for seeds
-#                       specifically built to consume it (e.g.
-#                       vulcan_scan_class-style seeds, once updated to pin
-#                       the map — plain per-folio/global seeds should NOT
-#                       set this).
+#   ENABLE_BPF_SCAN_MAP ground-truth scan-thread classification via the
+#                       pinned scan_pids BPF map (default "1" — ON).
+#                       See setup.sh's header comment for the underlying
+#                       My-YCSB mechanism. THIS SCRIPT owns the map's
+#                       lifecycle, not the attached policy: it creates and
+#                       pins an empty scan_pids map itself (via bpftool,
+#                       below) before the policy loader ever starts, and
+#                       removes the pin on exit. This is deliberate —
+#                       fairness across experiments requires every policy
+#                       to see the exact same benchmark environment
+#                       regardless of whether it knows what scan_pids is,
+#                       so the map's existence must never depend on which
+#                       policy happens to be attached. My-YCSB's writes
+#                       into it always succeed once this script has run;
+#                       most seeds simply never look at it. A seed that
+#                       wants the ground-truth signal attaches to this
+#                       SAME map via bpf_obj_get() + bpf_map__reuse_fd()
+#                       in its own loader (see vulcan_scan_class.c) rather
+#                       than creating/pinning its own — do not have a seed
+#                       pin its own map at this path, it would race this
+#                       script's create/cleanup.
 
 set -euo pipefail
 
@@ -69,7 +73,7 @@ DB_VALUE_SIZE="${DB_VALUE_SIZE:-200}"
 ZIPFIAN_CONSTANT="${ZIPFIAN_CONSTANT:-0.99}"
 DB_DIR="${DB_DIR:-/mydata/evo_get_scan_db}"
 YCSB_SCAN_DIR="${YCSB_SCAN_DIR:-/mydata/evo_cache/cache_ext/My-YCSB-scan}"
-ENABLE_BPF_SCAN_MAP="${ENABLE_BPF_SCAN_MAP:-0}"
+ENABLE_BPF_SCAN_MAP="${ENABLE_BPF_SCAN_MAP:-1}"
 SCAN_PIDS_PIN_PATH="/sys/fs/bpf/cache_ext/scan_pids"
 
 INIT_BIN="$YCSB_SCAN_DIR/build/init_leveldb"
@@ -94,8 +98,9 @@ cleanup() {
         kill -0 "$LOADER_PID" 2>/dev/null && kill -9 "$LOADER_PID" 2>/dev/null || true
         wait "$LOADER_PID" 2>/dev/null || true
     }
-    # Best-effort: never leave a stale pin behind for the next round,
-    # regardless of whether this round's policy pinned it itself.
+    # This script owns the scan_pids map's lifecycle (see ENABLE_BPF_SCAN_MAP
+    # doc above) — always clear its own pin on exit, regardless of how the
+    # round ended, so a crashed round never shadows the next one's map.
     rm -f "$SCAN_PIDS_PIN_PATH" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -103,6 +108,9 @@ trap cleanup EXIT
 # Pre-flight.
 [[ -x "$INIT_BIN" ]] || err "missing $INIT_BIN — run: eval/get_scan/setup.sh setup"
 [[ -x "$RUN_BIN"  ]] || err "missing $RUN_BIN — run: eval/get_scan/setup.sh setup"
+if [[ "$ENABLE_BPF_SCAN_MAP" == "1" ]]; then
+    command -v bpftool >/dev/null || err "bpftool not found (needed for ENABLE_BPF_SCAN_MAP=1)"
+fi
 
 mkdir -p "$JOB_DIR"
 RESULTS_FILE="$JOB_DIR/results.json"
@@ -111,9 +119,24 @@ INIT_CFG="$JOB_DIR/init.yaml"
 RUN_CFG="$JOB_DIR/run.yaml"
 RUN_LOG="$JOB_DIR/run.log"
 
-# Clear any pin left over from a crashed prior round BEFORE anything starts,
-# so a fresh policy's pin (or the absence of one) isn't shadowed by stale data.
+# --------------------------------------------------------------------------
+# scan_pids map: created and pinned by THIS SCRIPT (not by whichever policy
+# is attached — see ENABLE_BPF_SCAN_MAP doc above), so its existence never
+# depends on the policy under test. Key/value sizes match
+# cache_ext/policies/cache_ext_get_scan.bpf.c's own scan_pids declaration
+# (key=int TID, value=bool) — My-YCSB's fill_bpf_map_with_scan_pid() writes
+# a 4-byte int but bpf_map_update_elem() only copies the map's actual
+# value_size (1 byte) from it, so this matches regardless of the C++ side's
+# looser local variable type.
+# --------------------------------------------------------------------------
 rm -f "$SCAN_PIDS_PIN_PATH" 2>/dev/null || true
+if [[ "$ENABLE_BPF_SCAN_MAP" == "1" ]]; then
+    mkdir -p "$(dirname "$SCAN_PIDS_PIN_PATH")"
+    bpftool map create "$SCAN_PIDS_PIN_PATH" \
+        type hash key 4 value 1 entries 1024 name scan_pids \
+        || err "failed to create+pin scan_pids map at $SCAN_PIDS_PIN_PATH"
+    log "scan_pids map pinned at $SCAN_PIDS_PIN_PATH"
+fi
 
 # --------------------------------------------------------------------------
 # DB init (cached — re-init only if size/shape changes). init_leveldb
@@ -192,8 +215,8 @@ sync
 echo 3 > /proc/sys/vm/drop_caches
 sleep 1
 
-# Optional policy load.
-BENCH_EXTRA_ENVS=()
+# Optional policy load. The scan_pids map (above) already exists
+# independent of this, so no ordering dependency between the two anymore.
 if [[ -n "$POLICY_BINARY" ]]; then
     [[ -x "$POLICY_BINARY" ]] || err "Not executable: $POLICY_BINARY"
     echo 'n' | tee /sys/kernel/mm/lru_gen/enabled > /dev/null 2>&1 || true
@@ -209,21 +232,12 @@ if [[ -n "$POLICY_BINARY" ]]; then
         err "policy loader died immediately"
     fi
     log "Policy loader running (PID $LOADER_PID)"
-    if [[ "$ENABLE_BPF_SCAN_MAP" == "1" ]]; then
-        # Give the loader a moment to pin scan_pids before the benchmark
-        # can possibly need it. Best-effort check, not a hard guarantee —
-        # if the attached policy doesn't pin the map at all, My-YCSB will
-        # abort on its first scan op with a clear "Failed to get map file
-        # descriptor" error in run.log, not a silent hang.
-        for _ in 1 2 3 4 5; do
-            [[ -e "$SCAN_PIDS_PIN_PATH" ]] && break
-            sleep 0.2
-        done
-        BENCH_EXTRA_ENVS+=("ENABLE_BPF_SCAN_MAP=1")
-    fi
 else
     log "No POLICY_BINARY set — running baseline (calibration mode)"
 fi
+
+BENCH_EXTRA_ENVS=()
+[[ "$ENABLE_BPF_SCAN_MAP" == "1" ]] && BENCH_EXTRA_ENVS+=("ENABLE_BPF_SCAN_MAP=1")
 
 # Bench config: zipfian GET/SCAN mix (mixed_get_scan-equivalent).
 read_prop="$(awk "BEGIN { printf \"%.4f\", 1 - $SCAN_PROPORTION }")"

@@ -17,11 +17,13 @@
 # iff $ENABLE_BPF_SCAN_MAP is set, bpf_obj_get()s the pinned map at
 # /sys/fs/bpf/cache_ext/scan_pids and writes {tid: 1} into it via a raw
 # bpf_map_update_elem — this is policy-agnostic (keyed purely by the pinned
-# path, not by which BPF skeleton owns the map), so any attached policy
-# that defines+pins its own scan_pids map (BPF_MAP_TYPE_HASH, key=int,
-# value=u8, pinned at that exact path, mirroring
-# cache_ext/policies/cache_ext_get_scan.c's bpf_map__pin call) receives the
-# same ground-truth scan-thread classification with zero My-YCSB changes.
+# path, not by which BPF skeleton owns the map). run_with_policy.sh
+# exploits exactly this: it creates and pins that map itself (via bpftool)
+# before any policy loader starts, so the map's existence never depends on
+# which seed is attached — every seed sees the identical environment. A
+# seed that wants the ground-truth signal attaches to that SAME map via
+# bpf_obj_get() + bpf_map__reuse_fd() in its own loader (see
+# vulcan_scan_class.c) instead of creating/pinning its own.
 # Confirmed by reading My-YCSB @ leveldb-scan branch commit de95ae5
 # (core/workload.cpp, core/worker.cpp) directly.
 #
@@ -51,6 +53,7 @@ cmd="${1:-help}"
 do_check() {
     rc=0
     command -v cmake >/dev/null || { echo "[get_scan] missing cmake" >&2; rc=1; }
+    command -v bpftool >/dev/null || { echo "[get_scan] missing bpftool — needed for ENABLE_BPF_SCAN_MAP (default on)" >&2; rc=1; }
     [[ -f /usr/local/include/yaml-cpp/yaml.h ]] || { echo "[get_scan] missing yaml-cpp — run: ./start_workers.sh --install-bench HOST... (shared dep)" >&2; rc=1; }
     [[ -f /usr/local/lib/libleveldb.so || -f /usr/local/lib/libleveldb.a ]] || { echo "[get_scan] missing libleveldb — run: ./start_workers.sh --install-bench HOST... (shared dep)" >&2; rc=1; }
     [[ -x "$INIT_BIN" ]] || { echo "[get_scan] missing $INIT_BIN — run: eval/get_scan/setup.sh setup" >&2; rc=1; }
