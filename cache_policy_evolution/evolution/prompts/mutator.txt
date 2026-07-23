@@ -4,14 +4,16 @@ parallel DFS branches; you accumulate memory across rounds of what you have
 already tried *on this branch*. Prefer targeted changes over rewrites.
 
 Every policy in this run is built on vulcan_bpf, a small BPF listener
-library for per-folio recency/frequency tracking and a handful of global
-signals (see the VULCAN_BPF ACCESSORS section below). This is a hard
-requirement, not an option: your mutations must stay grounded in vulcan_bpf
-primitives. Never delete the `vulcan_bpf.h`/`vulcan_feature.h` includes,
-never stop calling `vulcan_folio_on_access`/`vulcan_update_feature`, and
-never hand-roll your own MinMax/EWMA/Average/RollingWindow tracking when
-vulcan_bpf already provides it — use the listener primitives for any such
-signal instead.
+library spanning three tiers: per-folio (recency/frequency on a single
+folio), class (aggregated across every folio sharing a policy-assigned
+class_id), and global (a handful of cache-wide signals) — see the
+VULCAN_BPF ACCESSORS section below. This is a hard requirement, not an
+option: your mutations must stay grounded in vulcan_bpf primitives. Never
+delete the `vulcan_bpf.h`/`vulcan_feature.h`/`vulcan_class.h` includes,
+never stop calling `vulcan_folio_on_access`/`vulcan_update_feature`/
+`vulcan_update_class_feature`, and never hand-roll your own MinMax/EWMA/
+Average/RollingWindow tracking when vulcan_bpf already provides it — use
+the listener primitives for any such signal instead.
 
 The features tracked in this run — what raw signal is observed, at which
 tier (per-folio/class/global), and from which struct_ops call site it is
@@ -104,14 +106,17 @@ G. Never remove or bypass the vulcan_bpf scaffolding (the includes, the
    is out of scope for this run, even if it would score well.
 
 H. Do not add, remove, or redefine a feature. That means: no new enum
-   members in the global-feature enum, no change to
-   `VULCAN_NUM_GLOBAL_FEATURES`, no new fields in `folio_metadata`, and no
-   new call site for `vulcan_folio_on_access` / `vulcan_update_feature`
-   (they stay exactly where the seed puts them). If you want a new
-   signal, get it by attaching a different listener to an existing
-   feature, not by inventing a new one. A diff that adds a feature is out
-   of scope even if it would score well — find an equivalent move inside
-   the existing features instead.
+   members in the global- or class-feature enums, no change to
+   `VULCAN_NUM_GLOBAL_FEATURES` / `VULCAN_NUM_CLASS_FEATURES` /
+   `VULCAN_MAX_CLASSES`, no new fields in `folio_metadata`, no new call
+   site for `vulcan_folio_on_access` / `vulcan_update_feature` /
+   `vulcan_update_class_feature` (they stay exactly where the seed puts
+   them), and no change to how a seed derives `class_id` (which scheme,
+   which raw key it hashes or looks up). If you want a new signal, get it
+   by attaching a different listener to an existing feature, not by
+   inventing a new one. A diff that adds a feature is out of scope even
+   if it would score well — find an equivalent move inside the existing
+   features instead.
 
 ============================================================================
 POLICY METRICS — FEEDBACK CONVENTION (zero per-access overhead)
@@ -176,9 +181,10 @@ Per-folio (embedded in your own folio-keyed map value, e.g.
 
   vulcan_folio_init(now, size_pages, is_anonymous, class_id, client_tag)
                                                        -- construct, in folio_added.
-    class_id is inert in this run — there is no class-level feature store
-    built; pass 0 and never branch on it. It exists in the struct only
-    because it's part of core vulcan_bpf.h.
+    class_id is meaningful in this run — see the CLASS section below. It
+    must be assigned exactly the way the seed assigns it (see FATAL
+    PITFALL H); you may change which listeners observe the resulting
+    class features, not how class_id itself is derived.
   vulcan_folio_on_access(&meta->vulcan, now, refcount, mapcount, &cfg)
                                                        -- call once per
                                                           folio_accessed
@@ -244,6 +250,53 @@ Global (cache-internal only — fed exclusively from struct_ops handlers):
   vulcan_update_feature(GF_X, raw_value, &cfg)   -- feed an observation
   vulcan_get_min/max/avg/ewma(GF_X)              -- read back
   vulcan_get_latest/kth_recent/window_avg/window_count(GF_X)  -- RollingWindow only
+
+Class (aggregated across every folio sharing a policy-assigned class_id —
+sits between per-folio and global; requires "vulcan_class.h" plus
+VULCAN_NUM_CLASS_FEATURES / VULCAN_MAX_CLASSES #defined before it, same
+pattern as the global feature store above):
+
+  #define VULCAN_NUM_CLASS_FEATURES <N>
+  #define VULCAN_MAX_CLASSES <M>          // keep small (<=64) — see GOTCHA below
+  enum { CF_FOO = 0, ... };               // declare BEFORE #include "vulcan_class.h"
+
+  How class_id itself is assigned is fixed by the seed (FATAL PITFALL H
+  applies to the assignment scheme same as any other feature). Seeds in
+  this run assign class_id one of two ways — check which one yours uses
+  before touching class logic:
+    - an explicit, named scheme (e.g. "is this PID a known scanner" via a
+      policy-owned map) — the class boundaries carry real meaning.
+    - vulcan_class_from_pid/_from_u64/_from_size_bucket(num_classes) — a
+      generic hash bucket with no semantic identity, just even spread.
+  Do not swap which scheme a seed uses; that's changing a feature (H), not
+  tuning a listener.
+
+  vulcan_update_class_feature(class_id, CF_X, raw_value, &cfg)  -- feed an
+                                                                    observation
+  vulcan_get_class_min/max/avg/ewma(class_id, CF_X)             -- read back
+  vulcan_get_class_window_avg/window_count(class_id, CF_X)      -- RollingWindow only
+  vulcan_class_member_added(class_id) / _removed(class_id)      -- call from
+    folio_added / folio_evicted once class_id is assigned/released.
+  vulcan_get_class_count(class_id)       -- live folio count in this class.
+    Distinct from the listeners above: this counts MEMBERSHIP, not a value
+    stream. GOTCHA: only accurate if member_added/_removed are both called
+    — an unpaired call set will drift.
+  vulcan_class_top_by_ewma(CF_X, &out_score) -> class_id  -- which class
+    currently has the highest EWMA on this feature (only considers classes
+    with count > 0).
+  vulcan_class_top_by_count(&out_count) -> class_id       -- which class is
+    currently the most populous.
+  vulcan_class_touch(class_id, now) / vulcan_class_is_stale(class_id, now,
+    ttl_ns) / vulcan_class_reset(class_id, CF_X)  -- explicit staleness
+    bookkeeping (no background expiry exists). If a seed's class scheme can
+    reuse a class_id for an unrelated cohort (e.g. PID reuse), call touch
+    on every update and check is_stale before trusting the class's stats.
+
+  GOTCHA: vulcan_class_top_by_* scan all of [0, VULCAN_MAX_CLASSES) via
+  compile-time loop unrolling, not a runtime callback — this is why
+  VULCAN_MAX_CLASSES must stay small. Do not raise it casually; that's a
+  Tier 3-adjacent structural change even though it looks like a constant
+  tweak, because it changes the cost of every ranking call in the policy.
 
 Listener kinds available in this build: MinMax, EWMA, Average, Rolling
 Window. RollingPercentile and RollingCount are NOT ported to vulcan_bpf —
