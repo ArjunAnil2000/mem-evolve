@@ -1,0 +1,85 @@
+{
+  "ok": true,
+  "error": "",
+  "score": -2610215445.244334,
+  "wallclock_sec": 38.97652483699494,
+  "probes": {
+    "wallclock": {
+      "name": "wallclock",
+      "value": 38.97733705100836,
+      "unit": "seconds",
+      "direction": "minimize",
+      "summary": "38.98s",
+      "details": {
+        "seconds": 38.97733705100836
+      }
+    },
+    "cgroup_iostat": {
+      "name": "cgroup_iostat",
+      "value": 5219807232.0,
+      "unit": "bytes",
+      "direction": "minimize",
+      "summary": "rbytes=4978.0MiB wbytes=0.0MiB rios=431582",
+      "details": {
+        "rbytes": 5219807232,
+        "wbytes": 45056,
+        "rios": 431582
+      }
+    },
+    "cgroup_memstat": {
+      "name": "cgroup_memstat",
+      "value": 1247278.0,
+      "unit": "refaults",
+      "direction": "minimize",
+      "summary": "refault_file=1247278 pgmajfault=94 pgactivate=151082 resident_file=21MiB",
+      "details": {
+        "delta": {
+          "workingset_refault_file": 1247278,
+          "workingset_activate_file": 260633,
+          "workingset_restore_file": 81747,
+          "pgfault": 41917,
+          "pgmajfault": 94,
+          "pgactivate": 151082,
+          "pgdeactivate": 409715,
+          "pgscan": 1284766,
+          "pgsteal": 1268985
+        },
+        "final": {
+          "file": 22077440,
+          "file_mapped": 0,
+          "file_dirty": 4096
+        }
+      }
+    },
+    "policy_counters": {
+      "name": "policy_counters",
+      "value": 0.0,
+      "unit": "",
+      "direction": "record",
+      "summary": "(no policy_metrics file \u2014 policy did not export counters)",
+      "details": {}
+    }
+  },
+  "stdout_tail": "[get_scan] scan_pids map pinned at /sys/fs/bpf/cache_ext/scan_pids\n[get_scan] Reusing cached DB at /mydata/evo_get_scan_db\n[get_scan] Cgroup: cache_ext_baseline max=64MB\n[get_scan] Policy loader running (PID 18742)\n[get_scan] Running GET-SCAN (30s, 4 threads, scan=0.05, ENABLE_BPF_SCAN_MAP=1)...\n[get_scan] Throughput: 25254.81 ops/sec   READ p99=704110.64 ns   SCAN p99=2840935.62 ns   \u2192 /mydata/step3_results/exp-2__noop/results.json\n[get_scan] Done.\n",
+  "stderr_tail": "",
+  "workload_results": {
+    "throughput_ops_per_sec": 25254.81,
+    "read_throughput_ops_per_sec": 24486.99,
+    "scan_throughput_ops_per_sec": 767.82,
+    "read_avg_latency_ns": 118860.33,
+    "read_p99_latency_ns": 704110.64,
+    "scan_p99_latency_ns": 2840935.62,
+    "config": {
+      "db_nr_entry": 500000,
+      "key_size": 16,
+      "value_size": 200,
+      "cache_limit_mb": 64,
+      "runtime_seconds": 30,
+      "threads": 4,
+      "scan_proportion": 0.05,
+      "scan_length": 500,
+      "enable_bpf_scan_map": "1"
+    }
+  },
+  "seed_path": "/mydata/evo_cache/cache_policy_evolution/seeds/noop.c"
+}

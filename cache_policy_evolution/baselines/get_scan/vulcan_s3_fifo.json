@@ -1,0 +1,90 @@
+{
+  "ok": true,
+  "error": "",
+  "score": -2633311523.0018735,
+  "wallclock_sec": 39.006671337992884,
+  "probes": {
+    "wallclock": {
+      "name": "wallclock",
+      "value": 39.007493833996705,
+      "unit": "seconds",
+      "direction": "minimize",
+      "summary": "39.01s",
+      "details": {
+        "seconds": 39.007493833996705
+      }
+    },
+    "cgroup_iostat": {
+      "name": "cgroup_iostat",
+      "value": 5265993728.0,
+      "unit": "bytes",
+      "direction": "minimize",
+      "summary": "rbytes=5022.0MiB wbytes=0.0MiB rios=443930",
+      "details": {
+        "rbytes": 5265993728,
+        "wbytes": 40960,
+        "rios": 443930
+      }
+    },
+    "cgroup_memstat": {
+      "name": "cgroup_memstat",
+      "value": 1258597.0,
+      "unit": "refaults",
+      "direction": "minimize",
+      "summary": "refault_file=1258597 pgmajfault=61 pgactivate=149429 resident_file=19MiB",
+      "details": {
+        "delta": {
+          "workingset_refault_file": 1258597,
+          "workingset_activate_file": 397596,
+          "workingset_restore_file": 62380,
+          "pgfault": 36516,
+          "pgmajfault": 61,
+          "pgactivate": 149429,
+          "pgdeactivate": 227412,
+          "pgscan": 330667,
+          "pgsteal": 326009
+        },
+        "final": {
+          "file": 20267008,
+          "file_mapped": 0,
+          "file_dirty": 8192
+        }
+      }
+    },
+    "policy_counters": {
+      "name": "policy_counters",
+      "value": 0.0,
+      "unit": "",
+      "direction": "record",
+      "summary": "cache_size_pages=16384 main_list_size_exit=150053 policy_name=vulcan_s3_fifo small_list_size_exit=-32",
+      "details": {
+        "policy_name": "vulcan_s3_fifo",
+        "cache_size_pages": 16384,
+        "small_list_size_exit": -32,
+        "main_list_size_exit": 150053
+      }
+    }
+  },
+  "stdout_tail": "[get_scan] scan_pids map pinned at /sys/fs/bpf/cache_ext/scan_pids\n[get_scan] Reusing cached DB at /mydata/evo_get_scan_db\n[get_scan] Cgroup: cache_ext_baseline max=64MB\n[get_scan] Policy loader running (PID 19717)\n[get_scan] Running GET-SCAN (30s, 4 threads, scan=0.05, ENABLE_BPF_SCAN_MAP=1)...\n[get_scan] Throughput: 26075.45 ops/sec   READ p99=682563.16 ns   SCAN p99=3020606.26 ns   \u2192 /mydata/step3_results/exp-2__vulcan_s3_fifo/results.json\n[get_scan] Done.\n",
+  "stderr_tail": "",
+  "workload_results": {
+    "throughput_ops_per_sec": 26075.45,
+    "read_throughput_ops_per_sec": 25329.02,
+    "scan_throughput_ops_per_sec": 746.43,
+    "read_avg_latency_ns": 114940.6,
+    "read_p99_latency_ns": 682563.16,
+    "scan_p99_latency_ns": 3020606.26,
+    "config": {
+      "db_nr_entry": 500000,
+      "key_size": 16,
+      "value_size": 200,
+      "cache_limit_mb": 64,
+      "runtime_seconds": 30,
+      "threads": 4,
+      "scan_proportion": 0.05,
+      "scan_length": 500,
+      "enable_bpf_scan_map": "1"
+    }
+  },
+  "seed_path": "/mydata/evo_cache/cache_policy_evolution/seeds/vulcan_s3_fifo.c"
+}
