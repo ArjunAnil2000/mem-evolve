@@ -56,7 +56,7 @@ def _stage_policy_lib_headers(policies_dir: str) -> None:
 # Makefile's BPF rule has no project -I flags and resolves quote-includes
 # from the including file's own directory, so the headers must physically
 # land in policies_dir before each build.
-_VULCAN_BPF_HEADERS = ("vulcan_bpf.h", "vulcan_feature.h")
+_VULCAN_BPF_HEADERS = ("vulcan_bpf.h", "vulcan_feature.h", "vulcan_class.h")
 
 
 def _stage_vulcan_bpf_headers(policies_dir: str) -> None:
