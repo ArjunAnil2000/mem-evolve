@@ -1,0 +1,91 @@
+# Evolution config — GET-SCAN over LevelDB (cache_ext paper Figure 8).
+# Usage:
+#   eval/get_scan/setup.sh setup   # one-time, per worker
+#   python3 evolve.py get_scan.toml
+#
+# Workers must have:
+#   1. Shared DB bench stack (yaml-cpp, cache_ext's LevelDB fork) — either
+#      already installed via ./start_workers.sh --install-bench, or
+#      eval/get_scan/setup.sh setup will install what's missing.
+#   2. A SEPARATE My-YCSB checkout on the leveldb-scan branch (NOT the
+#      leveldb-latency branch twitter_leveldb.toml uses — incompatible
+#      branches of the same upstream repo). eval/get_scan/setup.sh setup
+#      handles this in its own directory, default
+#      cache_ext/My-YCSB-scan, so it can coexist with twitter_leveldb's
+#      cache_ext/My-YCSB checkout.
+
+source_dir    = "../cache_ext"
+benchmark     = "eval/get_scan/run_with_policy.sh"
+output_dir    = "runs/get_scan"
+seeds_dir     = "seeds"
+mutator_prompt = "evolution/prompts/mutator.txt"
+
+rounds     = 20
+timeout    = 180
+resume     = false
+tree_file  = "evolution_tree.json"
+
+auto_calibrate     = true
+calibrate_baseline = "noop"   # vanilla Linux reference; stats freeze after calibration
+calibrate_runs     = 8        # bump for stable σ on a single regime
+
+workload_description = """
+GET-SCAN over LevelDB: a Zipfian-skewed keyspace (a small minority of hot
+keys account for most traffic) under a 95%/5% GET/SCAN operation mix.
+Exactly one worker thread is dedicated to issuing large sequential range
+scans (500 keys/scan); the rest issue point GETs against the hot-skewed
+distribution. The scan thread's traffic is the adversary here: large
+sequential scans risk evicting the hot GET working set from the cache the
+same way scan_thrash's cold sweep does, but against a real DB access
+pattern instead of a synthetic hot/cold directory split.
+
+Primary goal: maximize total throughput (ops/sec) — equivalently minimize
+bytes read from disk. Secondary: minimize READ p99 latency (tail latency
+reveals when the scan thread displaces the hot GET set) without starving
+SCAN throughput entirely (a policy that simply never evicts scan pages
+until they're the only thing left just delays the same problem).
+
+Every seed in this run's seeds_dir works against this workload — the
+GET/SCAN traffic mix itself is real either way. A minority of seeds can
+additionally request ground-truth scan-thread classification via the
+$ENABLE_BPF_SCAN_MAP env var (see eval/get_scan/run_with_policy.sh) if
+they define and pin their own scan_pids BPF map; most seeds don't and
+don't need to.
+"""
+
+# Empty = run locally. Fill in one URL per worker daemon, e.g.:
+# workers = ["http://host1:8080", "http://host2:8080", "http://host3:8080"]
+workers = []
+
+[http_worker]
+cgroup = "/sys/fs/cgroup/cache_ext_evo_bench"
+
+[llm.mutator]
+model       = "claude-sonnet"
+provider    = "openai"
+api_base    = "http://localhost:4000/v1"
+api_key_env = "LITELLM_MASTER_KEY"
+temperature = 0.85
+
+[llm.planner]
+model       = "claude-opus"
+provider    = "openai"
+api_base    = "http://localhost:4000/v1"
+api_key_env = "LITELLM_MASTER_KEY"
+temperature = 0.5
+
+[scoring]
+squash                  = "tanh"
+min_n                   = 2
+update_during_evolution = false   # true = original "evolving z-score" mode
+
+[scoring.weights]
+cgroup_iostat   = 1.0
+cgroup_memstat  = 0.5
+wallclock       = 0.25
+
+[evolution]
+checkpoint_interval     = 5
+top_k_for_checkpoint    = 10
+max_spawn               = 2
+checkpoint_temperature  = 0.5
