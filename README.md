@@ -94,6 +94,8 @@ counters rather than parsing benchmark output:
   JSON into a self-contained interactive HTML page.
 - **`claude_api/`** — a small OpenAI-compatible proxy backed by the Claude Code
   CLI, so the coordinator's OpenAI client can talk to Claude Code locally.
+  Optional/alternative to a LiteLLM proxy — the default configs point at
+  LiteLLM instead (see Quickstart).
 - **CloudLab provisioning helpers** — `setup_cloudlab.sh`, `setup_main_node.sh`,
   `start_workers.sh`, `parse_ssh.sh`.
 - **`cache_ext/`** — the custom kernel + eBPF runtime, pulled in as a git submodule.
@@ -104,7 +106,11 @@ counters rather than parsing benchmark output:
 git clone --recurse-submodules <this-repo>
 cd evo_cache/cache_policy_evolution
 pip install -r requirements.txt
-export ANTHROPIC_API_KEY=...        # or set api_key_env in your TOML
+
+# LLM calls go through a LiteLLM proxy (OpenAI-compatible) by default — see
+# [llm.mutator]/[llm.planner] in the TOMLs (api_base, api_key_env). Point
+# api_base at your LiteLLM server and export the key it reads:
+export LITELLM_MASTER_KEY=...       # or whatever api_key_env names in your TOML
 
 # Run locally (workers = [] in the config → single in-process worker):
 python3 evolve.py scan_thrash.toml
@@ -131,8 +137,9 @@ workers = ["http://host1:8080", "http://host2:8080"]
   build/install scripts.
 - System deps: `clang-14`, `bpftool`, `libbpf`, `build-essential`, `libelf-dev`.
 - Python deps: see `cache_policy_evolution/requirements.txt`.
-- An LLM API key (Anthropic by default; any OpenAI-compatible endpoint works via
-  the `llm_adapter`).
+- An LLM endpoint reachable from the coordinator — a LiteLLM proxy by default
+  (any OpenAI-compatible endpoint works via `llm_adapter`; direct Anthropic
+  access is also supported by setting `provider = "anthropic"` in the TOML).
 
 The coordinator needs `clang`/`bpftool` (it compiles policies and ships
 pre-built binaries to workers). Worker nodes only need Python 3, the booted
