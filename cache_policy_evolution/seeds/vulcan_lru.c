@@ -2,7 +2,10 @@
 // SECTION: BPF KERNEL CODE
 // ============================================================================
 // EVOLVE-BLOCK-START
-// Plain LRU: single list, move-to-tail on access, evict from head.
+// vulcan_bpf-based LRU: single list, move-to-tail on access, evict from
+// head — same structure as the plain LRU seed, but every folio carries
+// vulcan_bpf per-folio listeners (interval MinMax/EWMA) so a mutation can
+// build on recency data instead of hand-rolling its own tracking.
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
@@ -11,14 +14,37 @@
 #include "cache_ext_lib.bpf.h"
 #include "dir_watcher.bpf.h"
 
+#include "vulcan_bpf.h"
+
 char _license[] SEC("license") = "GPL";
 
 static u64 main_list;
+
+struct folio_metadata {
+	struct vulcan_folio_metadata vulcan;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, u64);
+	__type(value, struct folio_metadata);
+	__uint(max_entries, 4000000);
+} folio_metadata_map SEC(".maps");
+
+static const struct vulcan_folio_config folio_cfg = {
+	.listener_mask = VULCAN_LISTENER_MINMAX | VULCAN_LISTENER_EWMA,
+	.ewma_alpha = 200,
+};
 
 static inline bool is_folio_relevant(struct folio *folio) {
 	if (!folio || !folio->mapping || !folio->mapping->host)
 		return false;
 	return inode_in_watchlist(folio->mapping->host->i_ino);
+}
+
+static inline struct folio_metadata *get_folio_metadata(struct folio *folio) {
+	u64 key = (u64)folio;
+	return bpf_map_lookup_elem(&folio_metadata_map, &key);
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(evo_policy_init, struct mem_cgroup *memcg)
@@ -52,17 +78,40 @@ void BPF_STRUCT_OPS(evo_policy_folio_accessed, struct folio *folio) {
 	if (!is_folio_relevant(folio))
 		return;
 
+	struct folio_metadata *data = get_folio_metadata(folio);
+	if (data)
+		vulcan_folio_on_access(&data->vulcan, bpf_ktime_get_ns(),
+				       BPF_CORE_READ(folio, _refcount.counter),
+				       BPF_CORE_READ(folio, _mapcount.counter),
+				       &folio_cfg);
+
 	// Move to tail (most-recently-used position)
 	bpf_cache_ext_list_move(main_list, folio, true);
 }
 
 void BPF_STRUCT_OPS(evo_policy_folio_evicted, struct folio *folio) {
+	u64 key = (u64)folio;
+	bpf_map_delete_elem(&folio_metadata_map, &key);
 	bpf_cache_ext_list_del(folio);
 }
 
 void BPF_STRUCT_OPS(evo_policy_folio_added, struct folio *folio) {
 	if (!is_folio_relevant(folio))
 		return;
+
+	u64 key = (u64)folio;
+	/* size_pages=1 (see cache_ext_lib.bpf.h folio_nr_pages); is_anonymous=0
+	 * (watched folios are file-backed, Fatal Pitfall B); class_id=0/inert
+	 * this experiment; client_tag=0 unused by this seed's logic. */
+	struct folio_metadata new_meta = {
+		.vulcan = vulcan_folio_init(bpf_ktime_get_ns(), /*size_pages=*/1,
+					    /*is_anonymous=*/0, /*class_id=*/0,
+					    /*client_tag=*/0),
+	};
+	if (bpf_map_update_elem(&folio_metadata_map, &key, &new_meta, BPF_ANY)) {
+		bpf_printk("evo_policy: added: Failed to create metadata\n");
+		return;
+	}
 
 	/* Add to tail — new pages start as most-recently-used.
 	 * If already in list (readahead re-add), move to tail instead. */
@@ -227,19 +276,13 @@ int main(int argc, char **argv) {
 		goto cleanup;
 	}
 
-	printf("evo_policy (LRU) running. Press Ctrl+C to exit...\n");
+	printf("evo_policy (Vulcan LRU) running. Press Ctrl+C to exit...\n");
 	while (!exiting)
 		sleep(1);
 
-	/* Surface anything you want the LLM to see in next-round feedback.
-	 * Plain LRU has no per-policy state worth tracking; we just stamp
-	 * the policy name as an anchor. Mutations that add real state
-	 * (queue sizes, ghost-hit counts, BPF globals you bumped from
-	 * struct_ops handlers) should add evo_dump_u64() lines for them
-	 * right here — zero per-access overhead, runs once on exit. */
 	{
 		FILE *m = evo_metrics_open();
-		evo_dump_str(m, "policy_name", "lru");
+		evo_dump_str(m, "policy_name", "vulcan_lru");
 		evo_metrics_close(m);
 	}
 	ret = 0;
