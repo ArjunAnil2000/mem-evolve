@@ -269,11 +269,9 @@ void BPF_STRUCT_OPS(evo_policy_folio_added, struct folio *folio) {
 	struct folio_metadata new_meta = {
 		/* size_pages=1 (see cache_ext_lib.bpf.h folio_nr_pages);
 		 * is_anonymous=0 (watched folios are file-backed, Fatal
-		 * Pitfall B); class_id=0/inert this experiment; client_tag=0
-		 * unused by this seed's logic. */
+		 * Pitfall B); client_tag=0 unused by this seed's logic. */
 		.vulcan = vulcan_folio_init(bpf_ktime_get_ns(), /*size_pages=*/1,
-					    /*is_anonymous=*/0, /*class_id=*/0,
-					    /*client_tag=*/0),
+					    /*is_anonymous=*/0, /*client_tag=*/0),
 	};
 
 	u64 list_to_add;

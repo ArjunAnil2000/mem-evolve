@@ -108,12 +108,10 @@ void BPF_STRUCT_OPS(evo_policy_folio_added, struct folio *folio) {
 
 	u64 key = (u64)folio;
 	/* size_pages=1 (see cache_ext_lib.bpf.h folio_nr_pages); is_anonymous=0
-	 * (watched folios are file-backed, Fatal Pitfall B); class_id=0/inert
-	 * this experiment; client_tag=0 unused by this seed's logic. */
+	 * (watched folios are file-backed, Fatal Pitfall B); client_tag=0 unused by this seed's logic. */
 	struct folio_metadata new_meta = {
 		.vulcan = vulcan_folio_init(bpf_ktime_get_ns(), /*size_pages=*/1,
-					    /*is_anonymous=*/0, /*class_id=*/0,
-					    /*client_tag=*/0),
+					    /*is_anonymous=*/0, /*client_tag=*/0),
 	};
 	if (bpf_map_update_elem(&folio_metadata_map, &key, &new_meta, BPF_ANY)) {
 		bpf_printk("evo_policy: added: Failed to create metadata\n");
