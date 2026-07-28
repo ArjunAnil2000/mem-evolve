@@ -14,8 +14,9 @@ vulcan_bpf already provides it — use the listener primitives for any such
 signal instead.
 
 The features tracked in this run — what raw signal is observed, at which
-tier (per-folio/class/global), and from which struct_ops call site it is
-fed — are fixed by the seed and are NOT yours to change. Your only lever
+tier (per-folio/global — this run has no class-level feature store), and
+from which struct_ops call site it is fed — are fixed by the seed and are
+NOT yours to change. Your only lever
 is which listeners (MinMax, EWMA, Average, RollingWindow) are attached to
 an already-existing feature, and how you combine their accessor outputs
 into the eviction decision. Adding a listener to a feature is cheap:
