@@ -30,6 +30,14 @@ enum vulcan_global_feature {
 
 #include "vulcan_feature.h"
 
+#define CF_ACCESS_INTERVAL 0
+#define VULCAN_NUM_CLASS_FEATURES 1
+// Generic hash-bucket classing (vulcan_class_from_pid below) — no semantic
+// identity, just even spread across a small number of buckets.
+#define VULCAN_MAX_CLASSES 8
+
+#include "vulcan_class.h"
+
 char _license[] SEC("license") = "GPL";
 
 #define COLD_INTERVAL_BASE_NS (50ULL * 1000 * 1000) // baseline "hot" bar before the window has samples
@@ -47,6 +55,7 @@ __u64 g_pressure_rising_evictions = 0; // evictions decided under the tightened 
 
 struct folio_metadata {
 	struct vulcan_folio_metadata vulcan;
+	u32 class_id;
 };
 
 struct {
@@ -67,6 +76,18 @@ static const struct vulcan_folio_config folio_cfg = {
 static const struct vulcan_feature_config gf_victim_interval_cfg = {
 	.listener_mask = VULCAN_LISTENER_RW,
 	.rw_size = VICTIM_WINDOW_SIZE,
+};
+
+// Class-level listener config: EWMA of inter-access interval within a
+// class, bucketed by PID via vulcan_class_from_pid. Not consumed by
+// evict_cb yet — a mutation can wire vulcan_get_class_ewma /
+// vulcan_class_top_by_* into the eviction decision (Tier 2) without
+// adding a new feature.
+static const struct vulcan_feature_config class_cfg[VULCAN_NUM_CLASS_FEATURES] = {
+	[CF_ACCESS_INTERVAL] = {
+		.listener_mask = VULCAN_LISTENER_EWMA,
+		.ewma_alpha = 150,
+	},
 };
 
 static inline bool is_folio_relevant(struct folio *folio) {
@@ -152,11 +173,21 @@ void BPF_STRUCT_OPS(evo_policy_folio_accessed, struct folio *folio) {
 		return;
 
 	struct folio_metadata *data = get_folio_metadata(folio);
-	if (data)
-		vulcan_folio_on_access(&data->vulcan, bpf_ktime_get_ns(),
+	if (data) {
+		u64 now = bpf_ktime_get_ns();
+
+		if (data->vulcan.access_count > 1) {
+			s64 interval = (s64)(now - data->vulcan.last_access_ts);
+			vulcan_update_class_feature(data->class_id, CF_ACCESS_INTERVAL,
+						    interval, &class_cfg[CF_ACCESS_INTERVAL]);
+			vulcan_class_touch(data->class_id, now);
+		}
+
+		vulcan_folio_on_access(&data->vulcan, now,
 				       BPF_CORE_READ(folio, _refcount.counter),
 				       BPF_CORE_READ(folio, _mapcount.counter),
 				       &folio_cfg);
+	}
 
 	/* Promote to tail (protected end) on re-access - the scan-resistance
 	 * mechanism: one-shot scan pages stay near the head and get evicted,
@@ -170,6 +201,8 @@ void BPF_STRUCT_OPS(evo_policy_folio_evicted, struct folio *folio) {
 		s64 interval_ewma = vulcan_ewma_get(&data->vulcan.interval_ewma);
 		vulcan_update_feature(GF_VICTIM_INTERVAL, interval_ewma, &gf_victim_interval_cfg);
 	}
+	if (data)
+		vulcan_class_member_removed(data->class_id);
 
 	u64 key = (u64)folio;
 	bpf_map_delete_elem(&folio_metadata_map, &key);
@@ -182,19 +215,25 @@ void BPF_STRUCT_OPS(evo_policy_folio_added, struct folio *folio) {
 		return;
 
 	u64 key = (u64)folio;
+	u64 now = bpf_ktime_get_ns();
+	u32 class_id = vulcan_class_from_pid(VULCAN_MAX_CLASSES);
+
 	/* size_pages hardcoded to 1 (see cache_ext_lib.bpf.h folio_nr_pages);
 	 * is_anonymous=0 since watched folios are always file-backed (Fatal
-	 * Pitfall B); class_id=0/inert — no class-level feature store in
-	 * this experiment; client_tag=0 — not used by this seed's logic. */
+	 * Pitfall B); client_tag=0 — not used by this seed's logic. */
 	struct folio_metadata new_meta = {
-		.vulcan = vulcan_folio_init(bpf_ktime_get_ns(), /*size_pages=*/1,
-					    /*is_anonymous=*/0, /*class_id=*/0,
+		.vulcan = vulcan_folio_init(now, /*size_pages=*/1,
+					    /*is_anonymous=*/0, class_id,
 					    /*client_tag=*/0),
+		.class_id = class_id,
 	};
 	if (bpf_map_update_elem(&folio_metadata_map, &key, &new_meta, BPF_ANY)) {
 		bpf_printk("evo_policy: added: Failed to create metadata\n");
 		return;
 	}
+
+	vulcan_class_member_added(class_id);
+	vulcan_class_touch(class_id, now);
 
 	/* Add at HEAD (probationary). Re-accessed folios get promoted to
 	 * tail by folio_accessed. If already in list (readahead re-add),
