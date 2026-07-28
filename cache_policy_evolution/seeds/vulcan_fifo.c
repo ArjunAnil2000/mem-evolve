@@ -4,8 +4,10 @@
 // EVOLVE-BLOCK-START
 // vulcan_bpf-based FIFO: insertion-order list, evict from head — same
 // structure as the plain FIFO seed, but every folio is instrumented with
-// vulcan_bpf per-folio listeners (interval MinMax/EWMA) so a mutation can
-// start using recency signals without inventing its own tracking.
+// vulcan_bpf per-folio listeners (interval MinMax/EWMA) AND a class-level
+// listener (access-interval EWMA, bucketed by PID via vulcan_class_from_pid)
+// so a mutation can start using recency or class signals without inventing
+// its own tracking.
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
@@ -18,12 +20,21 @@
 // cache_ext/vulcan_bpf/README.md.
 #include "vulcan_bpf.h"
 
+#define CF_ACCESS_INTERVAL 0
+#define VULCAN_NUM_CLASS_FEATURES 1
+// Generic hash-bucket classing (vulcan_class_from_pid below) — no semantic
+// identity, just even spread across a small number of buckets.
+#define VULCAN_MAX_CLASSES 8
+
+#include "vulcan_class.h"
+
 char _license[] SEC("license") = "GPL";
 
 static u64 main_list;
 
 struct folio_metadata {
 	struct vulcan_folio_metadata vulcan;
+	u32 class_id;
 };
 
 struct {
@@ -40,6 +51,18 @@ struct {
 static const struct vulcan_folio_config folio_cfg = {
 	.listener_mask = VULCAN_LISTENER_MINMAX | VULCAN_LISTENER_EWMA,
 	.ewma_alpha = 200,
+};
+
+// Class-level listener config: EWMA of inter-access interval within a
+// class, bucketed by PID via vulcan_class_from_pid. Not consumed by
+// evict_cb yet — a mutation can wire vulcan_get_class_ewma /
+// vulcan_class_top_by_* into the eviction decision (Tier 2) without
+// adding a new feature.
+static const struct vulcan_feature_config class_cfg[VULCAN_NUM_CLASS_FEATURES] = {
+	[CF_ACCESS_INTERVAL] = {
+		.listener_mask = VULCAN_LISTENER_EWMA,
+		.ewma_alpha = 150,
+	},
 };
 
 static inline bool is_folio_relevant(struct folio *folio) {
@@ -90,15 +113,30 @@ void BPF_STRUCT_OPS(evo_policy_folio_accessed, struct folio *folio) {
 	// FIFO doesn't reorder on access — this only feeds the vulcan_bpf
 	// listeners so recency data is available to a future mutation.
 	struct folio_metadata *data = get_folio_metadata(folio);
-	if (data)
-		vulcan_folio_on_access(&data->vulcan, bpf_ktime_get_ns(),
+	if (data) {
+		u64 now = bpf_ktime_get_ns();
+
+		if (data->vulcan.access_count > 1) {
+			s64 interval = (s64)(now - data->vulcan.last_access_ts);
+			vulcan_update_class_feature(data->class_id, CF_ACCESS_INTERVAL,
+						    interval, &class_cfg[CF_ACCESS_INTERVAL]);
+			vulcan_class_touch(data->class_id, now);
+		}
+
+		vulcan_folio_on_access(&data->vulcan, now,
 				       BPF_CORE_READ(folio, _refcount.counter),
 				       BPF_CORE_READ(folio, _mapcount.counter),
 				       &folio_cfg);
+	}
 }
 
 void BPF_STRUCT_OPS(evo_policy_folio_evicted, struct folio *folio) {
 	u64 key = (u64)folio;
+
+	struct folio_metadata *data = get_folio_metadata(folio);
+	if (data)
+		vulcan_class_member_removed(data->class_id);
+
 	bpf_map_delete_elem(&folio_metadata_map, &key);
 }
 
@@ -107,18 +145,25 @@ void BPF_STRUCT_OPS(evo_policy_folio_added, struct folio *folio) {
 		return;
 
 	u64 key = (u64)folio;
+	u64 now = bpf_ktime_get_ns();
+	u32 class_id = vulcan_class_from_pid(VULCAN_MAX_CLASSES);
+
 	/* size_pages=1 (see cache_ext_lib.bpf.h folio_nr_pages); is_anonymous=0
-	 * (watched folios are file-backed, Fatal Pitfall B); class_id=0/inert
-	 * this experiment; client_tag=0 unused by this seed's logic. */
+	 * (watched folios are file-backed, Fatal Pitfall B); client_tag=0
+	 * unused by this seed's logic. */
 	struct folio_metadata new_meta = {
-		.vulcan = vulcan_folio_init(bpf_ktime_get_ns(), /*size_pages=*/1,
-					    /*is_anonymous=*/0, /*class_id=*/0,
+		.vulcan = vulcan_folio_init(now, /*size_pages=*/1,
+					    /*is_anonymous=*/0, class_id,
 					    /*client_tag=*/0),
+		.class_id = class_id,
 	};
 	if (bpf_map_update_elem(&folio_metadata_map, &key, &new_meta, BPF_ANY)) {
 		bpf_printk("evo_policy: added: Failed to create metadata\n");
 		return;
 	}
+
+	vulcan_class_member_added(class_id);
+	vulcan_class_touch(class_id, now);
 
 	if (bpf_cache_ext_list_add_tail(main_list, folio)) {
 		bpf_printk("evo_policy: added: Failed to add folio to main_list\n");
