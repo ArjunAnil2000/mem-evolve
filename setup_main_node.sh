@@ -15,7 +15,7 @@
 #
 # Usage:
 #   ./setup_main_node.sh <host>
-#   AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... ./setup_main_node.sh <host>
+#   AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_DEFAULT_REGION=... ./setup_main_node.sh <host>
 #
 # Options:
 #   --pat <token>          GitHub PAT. Optional — only needed if the repo
@@ -38,9 +38,10 @@
 #   --no-shell             Skip the final interactive ssh
 #
 ###########################################################################################
-# AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY must be exported in the calling
-# shell if --litellm-config is given — they're forwarded to the remote
-# litellm process's environment, never written to disk or to this script.
+# AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_DEFAULT_REGION must be
+# exported in the calling shell if --litellm-config is given — they're
+# forwarded to the remote litellm process's environment, never written to
+# disk or to this script.
 ###########################################################################################
 
 set -euo pipefail
@@ -86,8 +87,8 @@ if [[ -n "$LITELLM_CONFIG" && ! -f "$LITELLM_CONFIG" ]]; then
     exit 1
 fi
 if [[ -n "$LITELLM_CONFIG" ]] && ! $SKIP_LITELLM; then
-    if [[ -z "${AWS_ACCESS_KEY_ID:-}" || -z "${AWS_SECRET_ACCESS_KEY:-}" ]]; then
-        err "AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY must be exported to launch litellm (or pass --skip-litellm)"
+    if [[ -z "${AWS_ACCESS_KEY_ID:-}" || -z "${AWS_SECRET_ACCESS_KEY:-}" || -z "${AWS_DEFAULT_REGION:-}" ]]; then
+        err "AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_DEFAULT_REGION must be exported to launch litellm (or pass --skip-litellm)"
         exit 1
     fi
 fi
@@ -161,6 +162,7 @@ if [[ -n "$LITELLM_CONFIG" ]] && ! $SKIP_LITELLM; then
         export PATH=\"\$HOME/.local/bin:\$PATH\"
         export AWS_ACCESS_KEY_ID='${AWS_ACCESS_KEY_ID}'
         export AWS_SECRET_ACCESS_KEY='${AWS_SECRET_ACCESS_KEY}'
+        export AWS_DEFAULT_REGION='${AWS_DEFAULT_REGION}'
         cd ${LITELLM_REMOTE_DIR}
         pkill -x litellm 2>/dev/null || true
         sleep 1
@@ -172,8 +174,13 @@ if [[ -n "$LITELLM_CONFIG" ]] && ! $SKIP_LITELLM; then
 fi
 
 # 5) Health-check the LiteLLM endpoint. Doesn't fail the provisioning run.
+#    Send the master key if we have one — some litellm versions return 500
+#    (not 401/403) for an unauthenticated /v1/models call, which otherwise
+#    looks indistinguishable from the proxy actually being broken.
 log "[$HOST] checking LiteLLM at ${LITELLM_URL}"
-if run_remote "curl -fs --max-time 5 '${LITELLM_URL}/models' -o /dev/null -w '%{http_code}'" 2>/dev/null | grep -qE '^(200|401|403)$'; then
+AUTH_HEADER=()
+[[ -n "${LITELLM_MASTER_KEY:-}" ]] && AUTH_HEADER=(-H "'Authorization: Bearer ${LITELLM_MASTER_KEY}'")
+if run_remote "curl -fs --max-time 5 ${AUTH_HEADER[*]:-} '${LITELLM_URL}/models' -o /dev/null -w '%{http_code}'" 2>/dev/null | grep -qE '^(200|401|403)$'; then
     ok   "[$HOST] LiteLLM reachable at ${LITELLM_URL}"
 else
     err  "[$HOST] could not reach ${LITELLM_URL} — make sure your LiteLLM proxy is running there before starting evolution (use --litellm-url to point elsewhere, or --litellm-config to have this script launch one)"
