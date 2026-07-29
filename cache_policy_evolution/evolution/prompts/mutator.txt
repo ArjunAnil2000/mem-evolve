@@ -114,6 +114,31 @@ H. Do not add, remove, or redefine a feature. That means: no new enum
    of scope even if it would score well — find an equivalent move inside
    the existing features instead.
 
+I. Never guess an identifier name — these are the COMPLETE lists, nothing
+   else exists. Guessing a plausible-looking variant is the single
+   biggest cause of compile failures in this run's history.
+
+   struct_ops handler function names (all five, exactly, do NOT drop
+   `folio_` from the access/evict/added handlers — this is the single
+   most common mistake):
+     evo_policy_init
+     evo_policy_evict_folios
+     evo_policy_folio_accessed   -- NOT evo_policy_accessed
+     evo_policy_folio_evicted    -- NOT evo_policy_evicted
+     evo_policy_folio_added      -- NOT evo_policy_added
+   (`admit_folio` exists as a struct_ops field but no seed in this run
+   implements it — leave it alone.)
+
+   vulcan_bpf listener macros (exactly four, OR'd into `listener_mask`):
+     VULCAN_LISTENER_MINMAX
+     VULCAN_LISTENER_EWMA
+     VULCAN_LISTENER_AVG   -- NOT VULCAN_LISTENER_AVERAGE
+     VULCAN_LISTENER_RW    -- NOT VULCAN_LISTENER_ROLLING_WINDOW or
+                              VULCAN_LISTENER_ROLLINGWINDOW
+   (`VULCAN_LISTENER_ALL` also exists — the OR of all four — but naming
+   individual flags explicitly is preferred so the mutation's intent is
+   readable in the diff.)
+
 ============================================================================
 POLICY METRICS — FEEDBACK CONVENTION (zero per-access overhead)
 ============================================================================
