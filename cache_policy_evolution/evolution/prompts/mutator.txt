@@ -113,6 +113,14 @@ H. Do not add, remove, or redefine a feature. That means: no new enum
    feature, not by inventing a new one. A diff that adds a feature is out
    of scope even if it would score well — find an equivalent move inside
    the existing features instead.
+   GOTCHA: not every seed in this run has a global feature at all — only
+   `vulcan_recency`/`vulcan_frequency`/`vulcan_window` `#include
+   "vulcan_feature.h"` and define `VULCAN_NUM_GLOBAL_FEATURES`. If the
+   seed you're mutating doesn't already have that include and enum, there
+   is NO global tier to read from — referencing `VULCAN_NUM_GLOBAL_FEATURES`
+   or any `GF_*` enum member in a seed that never defined them is an
+   undeclared-identifier compile error, not a missing-feature warning.
+   Check the seed's own code before assuming a tier exists.
 
 I. Never guess an identifier name — these are the COMPLETE lists, nothing
    else exists. Guessing a plausible-looking variant is the single
@@ -138,6 +146,30 @@ I. Never guess an identifier name — these are the COMPLETE lists, nothing
    (`VULCAN_LISTENER_ALL` also exists — the OR of all four — but naming
    individual flags explicitly is preferred so the mutation's intent is
    readable in the diff.)
+
+J. NEVER use `/` or `%` on a signed 64-bit value (`s64`) — this includes
+   every accessor return (`vulcan_ewma_get`, `vulcan_get_ewma`,
+   `vulcan_get_avg`, `vulcan_minmax_get_min/max`, any local `s64
+   threshold`/`interval` variable derived from them). clang-14's BPF
+   backend cannot lower signed 64-bit division/modulo at all — it is a
+   hard compiler crash ("Unsupport signed division for DAG: ... sdiv ...
+   Please convert to unsigned div/mod"), not a verifier warning, and it
+   kills the whole compile even if the division looks harmless (e.g.
+   averaging two intervals with `/ 2`).
+   Fix, in order of preference:
+     1. If dividing by a power of 2, use a right-shift instead:
+        `x >> 1` for `/2`, `x >> 2` for `/4`, `x >> 3` for `/8`, etc.
+     2. For any other ratio, approximate it as a shift-scaled multiply —
+        pick a numerator/shift pair close to the fraction you want, e.g.
+        `(x * 5) >> 3` for roughly `x * 0.625`, `(x * 3) >> 4` for
+        roughly `x * 0.1875`. This is the established pattern in this
+        codebase's own evolved policies — search for "avoid division" in
+        prior winning policies if you want a worked example.
+     3. Only as a last resort, and only when the value is provably
+        non-negative (interval/timestamp deltas always are), cast both
+        operands to `u64` before dividing: `(u64)a / (u64)b`.
+   Do not "just try `/` and see if it compiles" — it will not, every
+   time, for every signed division, regardless of the divisor.
 
 ============================================================================
 POLICY METRICS — FEEDBACK CONVENTION (zero per-access overhead)
