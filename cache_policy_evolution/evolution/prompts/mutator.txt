@@ -147,8 +147,8 @@ I. Never guess an identifier name — these are the COMPLETE lists, nothing
    individual flags explicitly is preferred so the mutation's intent is
    readable in the diff.)
 
-J. NEVER use `/` or `%` on a signed 64-bit value (`s64`) — this includes
-   every accessor return (`vulcan_ewma_get`, `vulcan_get_ewma`,
+J. NEVER use `/` or `%` directly on a signed 64-bit value (`s64`) — this
+   includes every accessor return (`vulcan_ewma_get`, `vulcan_get_ewma`,
    `vulcan_get_avg`, `vulcan_minmax_get_min/max`, any local `s64
    threshold`/`interval` variable derived from them). clang-14's BPF
    backend cannot lower signed 64-bit division/modulo at all — it is a
@@ -157,17 +157,28 @@ J. NEVER use `/` or `%` on a signed 64-bit value (`s64`) — this includes
    kills the whole compile even if the division looks harmless (e.g.
    averaging two intervals with `/ 2`).
    Fix, in order of preference:
-     1. If dividing by a power of 2, use a right-shift instead:
-        `x >> 1` for `/2`, `x >> 2` for `/4`, `x >> 3` for `/8`, etc.
-     2. For any other ratio, approximate it as a shift-scaled multiply —
-        pick a numerator/shift pair close to the fraction you want, e.g.
-        `(x * 5) >> 3` for roughly `x * 0.625`, `(x * 3) >> 4` for
-        roughly `x * 0.1875`. This is the established pattern in this
-        codebase's own evolved policies — search for "avoid division" in
-        prior winning policies if you want a worked example.
-     3. Only as a last resort, and only when the value is provably
-        non-negative (interval/timestamp deltas always are), cast both
-        operands to `u64` before dividing: `(u64)a / (u64)b`.
+     1. Use the `vulcan_sdiv(a, b)` helper — it is ALREADY in
+        `vulcan_bpf.h` (vulcan_bpf.h itself is built on it: see
+        `vulcan_ewma_update`/`vulcan_avg_get`), takes two `s64` and
+        returns their signed quotient via unsigned division internally,
+        and is the drop-in, no-math-required replacement for `a / b`:
+          s64 avg_interval = vulcan_sdiv(min_interval + max_interval, 2);
+        This is correct for ANY divisor, not just powers of 2, and needs
+        no manual shift/scale work. Prefer this over options 2/3 below —
+        it's what the library itself uses internally to survive this
+        exact clang-14 limitation.
+     2. There is no `vulcan_smod` — signed `%` has no equivalent helper.
+        If both operands are provably non-negative (interval/timestamp
+        deltas always are), cast to `u64` first: `(u64)a % (u64)b`.
+     3. Only if you specifically want a fast power-of-2 divide (not a
+        general one), a right-shift is fine and cheaper than a function
+        call: `x >> 1` for `/2`, `x >> 2` for `/4`, etc. — or a
+        shift-scaled multiply for an arbitrary ratio, e.g. `(x * 5) >> 3`
+        for roughly `x * 0.625`. This is an established pattern in this
+        codebase's own evolved policies (search "avoid division" in prior
+        winning policies for a worked example) but `vulcan_sdiv` covers
+        the same case with less arithmetic to get wrong — use it unless
+        you have a specific reason to want the shift instead.
    Do not "just try `/` and see if it compiles" — it will not, every
    time, for every signed division, regardless of the divisor.
 
@@ -306,6 +317,124 @@ Global (cache-internal only — fed exclusively from struct_ops handlers):
 Listener kinds available in this build: MinMax, EWMA, Average, Rolling
 Window. RollingPercentile and RollingCount are NOT ported to vulcan_bpf —
 do not reference them, they don't exist here.
+
+COMPLETE vulcan_bpf SYMBOL TABLE — every identifier that exists, full
+stop. If a name you want to use is not on this list (or in FATAL PITFALL
+I's handler/macro lists above), it does not exist — do not invent it,
+do not guess a plausible variant, do not assume an obvious-sounding
+helper is there. This run's seeds only `#include "vulcan_bpf.h"` and
+(3 of them) `"vulcan_feature.h"` — there is no `vulcan_class.h` in this
+experiment, so anything with `class` in the name (`vulcan_get_class_*`,
+`vulcan_class_from_*`, `vulcan_class_top_by_*`, `vulcan_class_touch`,
+`vulcan_update_class_feature`, etc.) does NOT exist here — do not use it.
+
+  Constants:
+    VULCAN_FP_SCALE                 -- 1000. EWMA fixed-point scale; alpha
+                                        is an integer in [0, 1000], NOT a
+                                        float (1000 = alpha 1.0, 100 =
+                                        alpha 0.1).
+    VULCAN_MAX_WINDOW               -- 16. Compile-time cap on RollingWindow
+                                        size; `rw_size` in a feature config
+                                        above 16 is silently clamped to 16
+                                        inside vulcan_rw_update, it does not
+                                        error, but don't rely on a size you
+                                        ask for above 16 actually happening.
+
+  Config structs (you populate these as `static const`, you never define
+  new fields on them — see Fatal Pitfall H):
+    struct vulcan_feature_config {
+        u32 listener_mask;   // OR of VULCAN_LISTENER_MINMAX/EWMA/AVG/RW
+        u32 ewma_alpha;      // [0..1000], only read if EWMA bit is set
+        u32 rw_size;         // [1..16],   only read if RW bit is set
+    };
+      -- this is the config type for vulcan_update_feature (global tier).
+    struct vulcan_folio_config {
+        u32 listener_mask;   // OR of VULCAN_LISTENER_MINMAX/EWMA ONLY --
+                              // there is no `rw_size` field on this struct
+                              // and no AVG/RW support at the per-folio
+                              // tier. Setting VULCAN_LISTENER_AVG or
+                              // VULCAN_LISTENER_RW in a folio_cfg's mask
+                              // compiles (it's just an int) but
+                              // vulcan_folio_on_access() never checks
+                              // those bits, so it's a silent no-op, not
+                              // a new capability. If you want Average or
+                              // RollingWindow tracking on a per-folio
+                              // quantity, there is no way to get it at
+                              // this tier — use the global tier instead
+                              // (accumulate across all folios, not one).
+        u32 ewma_alpha;      // [0..1000]
+    };
+
+  Division helper (see Fatal Pitfall J — use this instead of `a / b` on
+  any s64):
+    s64 vulcan_sdiv(s64 a, s64 b)   -- safe signed division/quotient.
+                                        Returns 0 if b == 0 (no crash/trap).
+                                        No `vulcan_smod` exists — there is
+                                        no modulo equivalent; cast to u64
+                                        first for `%` if operands are
+                                        non-negative.
+
+  Listener primitives (you will not usually touch these structs directly
+  — they're what `struct vulcan_folio_metadata.interval_minmax` /
+  `.interval_ewma` above are made of, and what the global-tier maps in
+  vulcan_feature.h store per feature_id — but the raw update/get
+  functions are legal to call yourself on your OWN struct instance too,
+  e.g. if you keep a `struct vulcan_avg` inside your own per-list or
+  per-PID map value):
+    struct vulcan_minmax { s64 min_val; s64 max_val; u32 count; };
+      void vulcan_minmax_update(struct vulcan_minmax *mm, s64 val);
+      s64  vulcan_minmax_get_min(const struct vulcan_minmax *mm);
+      s64  vulcan_minmax_get_max(const struct vulcan_minmax *mm);
+    struct vulcan_ewma { s64 value; u32 initialized; };
+      void vulcan_ewma_update(struct vulcan_ewma *e, s64 val, u32 alpha);
+      s64  vulcan_ewma_get(const struct vulcan_ewma *e);
+    struct vulcan_avg { s64 sum; u64 count; };
+      void vulcan_avg_update(struct vulcan_avg *a, s64 val);
+      s64  vulcan_avg_get(const struct vulcan_avg *a);   -- uses vulcan_sdiv
+                                                              internally, safe.
+    struct vulcan_rolling_window { s64 values[VULCAN_MAX_WINDOW]; u32 head;
+                                   u32 count; s64 sum; };
+      void vulcan_rw_update(struct vulcan_rolling_window *rw, s64 val,
+                            u32 window_size);
+      s64  vulcan_rw_get_latest(const struct vulcan_rolling_window *rw);
+      s64  vulcan_rw_get_kth_recent(const struct vulcan_rolling_window *rw,
+                                    u32 k);   -- k=0 is the same as
+                                                  get_latest, k=count-1 is
+                                                  the oldest sample still
+                                                  in the window.
+      s64  vulcan_rw_get_avg(const struct vulcan_rolling_window *rw);
+      u32  vulcan_rw_get_count(const struct vulcan_rolling_window *rw);
+
+  Per-folio metadata (struct vulcan_folio_metadata, embedded in your own
+  map value struct — see the "Per-folio" section above for field-by-field
+  usage of everything inside it):
+    struct vulcan_folio_metadata vulcan_folio_init(u64 now, u32 size_pages,
+        u8 is_anonymous, u32 class_id, u32 client_tag);
+      -- class_id param exists in the signature (core vulcan_bpf.h is
+         shared with the class-tier experiment) but is INERT in this run
+         — always pass 0, never read it back, there is no class store to
+         look it up in.
+    void vulcan_folio_on_access(struct vulcan_folio_metadata *meta, u64 now,
+        s32 refcount, s32 mapcount, const struct vulcan_folio_config *cfg);
+    void vulcan_folio_on_evict(struct vulcan_folio_metadata *meta);
+
+  Global tier (only usable in seeds that already `#include
+  "vulcan_feature.h"` and define `VULCAN_NUM_GLOBAL_FEATURES` — see the
+  GOTCHA above; do not add this include/enum to a seed that lacks it,
+  that is a Fatal Pitfall H violation):
+    void vulcan_update_feature(u32 feature_id, s64 raw_value,
+        const struct vulcan_feature_config *cfg);
+    s64  vulcan_get_min(u32 feature_id);
+    s64  vulcan_get_max(u32 feature_id);
+    s64  vulcan_get_ewma(u32 feature_id);
+    s64  vulcan_get_avg(u32 feature_id);
+    s64  vulcan_get_latest(u32 feature_id);           -- RollingWindow only
+    s64  vulcan_get_kth_recent(u32 feature_id, u32 k); -- RollingWindow only
+    s64  vulcan_get_window_avg(u32 feature_id);        -- RollingWindow only
+    u32  vulcan_get_window_count(u32 feature_id);      -- RollingWindow only
+      -- every accessor above returns 0 if feature_id is out of range or
+         the backing map slot was never written — no crash, just a 0 you
+         must not mistake for a real observed value of 0.
 
 Choosing which listener(s) to attach to a feature:
 
