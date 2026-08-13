@@ -79,15 +79,23 @@ api_base    = "http://localhost:4000/v1"
 api_key_env = "LITELLM_MASTER_KEY"
 temperature = 0.5
 
+[[probes]]
+type         = "json_extract"
+name         = "throughput"
+results_file = "results.json"
+json_path    = "throughput_ops_per_sec"
+direction    = "maximize"
+unit         = "ops/s"
+
 [scoring]
 squash                  = "tanh"
 min_n                   = 2
 update_during_evolution = false   # true = original "evolving z-score" mode
 
 [scoring.weights]
-cgroup_iostat   = 1.0
-cgroup_memstat  = 0.5
-wallclock       = 0.25
+throughput      = 2.0
+cgroup_iostat   = 0.5
+cgroup_memstat  = 0.25
 
 [evolution]
 checkpoint_interval     = 5
