@@ -20,7 +20,7 @@ output_dir    = "runs/get_scan"
 seeds_dir     = "seeds"
 mutator_prompt = "evolution/prompts/mutator.txt"
 
-rounds     = 20
+rounds     = 50
 timeout    = 180
 resume     = false
 tree_file  = "evolution_tree.json"
