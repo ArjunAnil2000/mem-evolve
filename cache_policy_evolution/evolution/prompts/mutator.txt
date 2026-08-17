@@ -28,10 +28,9 @@ for it before reaching for anything structural.
 START SMALL, THEN ITERATE
 ============================================================================
 
-Mutations are cheapest, and most likely to survive, when they stay inside
-the fixed feature set and only change which listeners are attached or how
-their outputs are combined. Reach for structural changes only after that
-budget is exhausted:
+Mutations in this run stay inside the fixed feature set (Fatal Pitfall H)
+AND inside the fixed set of auxiliary data structures the seed you're
+mutating already defines (Fatal Pitfall L) — every mutation is one of:
 
   Tier 0 — toggle a listener flag on an existing feature's config (add or
            remove VULCAN_LISTENER_MINMAX/EWMA/AVG/RW), read the new
@@ -42,17 +41,20 @@ budget is exhausted:
   Tier 2 — change how already-available accessor outputs are combined
            into the score/threshold (blend two listeners on the same
            feature, swap which listener's output gates the eviction
-           decision, reweight an existing formula).
-  Tier 3 — new lists / metadata maps / eviction phases (2Q, ARC, CLOCK,
-           S3-FIFO, multi-tier). Only after a Tier 0–2 change has been
-           proven to move the score. This is the expensive tier: it
-           almost always times out or regresses when attempted first.
+           decision, reweight an existing formula, or change a threshold
+           that governs movement between the seed's EXISTING structures —
+           e.g. retuning small_list→main_list promotion criteria in
+           vulcan_s3_fifo/vulcan_frequency, without adding a new list).
 
-If you're about to write >100 lines of new BPF, stop and ask: "is there a
-Tier 0–2 change that captures the core idea first?" The answer is almost
-always yes — and that version will actually run.
+There is no Tier 3 in this run. New lists, new BPF maps, new ghost/
+tombstone structures, and new eviction phases are out of scope no matter
+how promising they'd score — see Fatal Pitfall L. If a mutation idea needs
+a structure the current seed doesn't already have (e.g. an admission
+ghost list on a plain single-list seed), that idea belongs on a seed that
+already has it (vulcan_s3_fifo, vulcan_frequency), not as a structural
+addition mutated into a simpler seed.
 
-Name the tier of your change (0/1/2/3) in the 1–2 sentence justification
+Name the tier of your change (0/1/2) in the 1–2 sentence justification
 required by OUTPUT FORMAT below.
 
 ============================================================================
@@ -197,6 +199,20 @@ K. Per-folio interval state has exactly two fields, not four:
    'interval_avg' in 'struct vulcan_folio_metadata'`, this run's second
    most common compile failure after Pitfall I's handler-name typos.
 
+L. Do not invent new auxiliary data structures. Every list and every BPF
+   map used for eviction bookkeeping must already exist in the seed you're
+   mutating — no new `bpf_cache_ext_ds_registry_new_list()` calls, no new
+   BPF maps for extra bookkeeping (ghost maps, tombstone maps, secondary
+   metadata maps, sketches), no new lists of any kind. Most seeds in this
+   run have exactly one list (`main_list`) and one metadata map
+   (`folio_metadata_map`); `vulcan_s3_fifo` and `vulcan_frequency` are the
+   only seeds with more (`small_list` + `main_list` + `ghost_map`,
+   S3-FIFO-style admission) — that richer structure came from the seed,
+   not from a mutation. If an idea needs a structure the seed you're
+   mutating doesn't already have, it is out of scope for that seed. Take
+   the idea to a seed that already has the structure it needs instead of
+   adding the structure yourself.
+
 ============================================================================
 POLICY METRICS — FEEDBACK CONVENTION (zero per-access overhead)
 ============================================================================
@@ -314,10 +330,13 @@ Per-folio (embedded in your own folio-keyed map value, e.g.
                                     (see vulcan_recency-style seeds) —
                                     under that pattern eviction_count never
                                     exceeds 0/1 and is not a useful signal.
-                                    It only becomes meaningful if a
-                                    mutation keeps a ghost/tombstone entry
-                                    alive across eviction (a Tier 3
-                                    structural change, not a Tier 0-2 one).
+                                    It would only become meaningful if the
+                                    metadata entry survived eviction, but
+                                    changing that survival behavior is a
+                                    new-structure change and out of scope
+                                    under Fatal Pitfall L — treat
+                                    eviction_count as not useful in this
+                                    run.
 
 Global (cache-internal only — fed exclusively from struct_ops handlers):
 
