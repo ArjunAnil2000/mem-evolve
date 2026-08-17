@@ -117,7 +117,7 @@ H. Do not add, remove, or redefine a feature. That means: no new enum
    inventing a new one. A diff that adds a feature is out of scope even
    if it would score well — find an equivalent move inside the existing
    features instead.
-   GOTCHA: not every seed in this run has a global feature — only
+   GOTCHA: not every seed in this run has a global feature at all — only
    `vulcan_recency`/`vulcan_frequency`/`vulcan_window` `#include
    "vulcan_feature.h"` and define `VULCAN_NUM_GLOBAL_FEATURES`. If the
    seed you're mutating doesn't already have that include and enum, there
