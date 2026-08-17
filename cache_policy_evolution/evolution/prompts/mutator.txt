@@ -44,15 +44,17 @@ mutating already defines (Fatal Pitfall L) — every mutation is one of:
            decision, reweight an existing formula, or change a threshold
            that governs movement between the seed's EXISTING structures —
            e.g. retuning small_list→main_list promotion criteria in
-           vulcan_s3_fifo/vulcan_frequency, without adding a new list).
+           vulcan_s3_fifo/vulcan_frequency, or the protected-segment
+           target-size percentage in vulcan_slru, without adding a new
+           list).
 
 There is no Tier 3 in this run. New lists, new BPF maps, new ghost/
 tombstone structures, and new eviction phases are out of scope no matter
 how promising they'd score — see Fatal Pitfall L. If a mutation idea needs
 a structure the current seed doesn't already have (e.g. an admission
 ghost list on a plain single-list seed), that idea belongs on a seed that
-already has it (vulcan_s3_fifo, vulcan_frequency), not as a structural
-addition mutated into a simpler seed.
+already has it (vulcan_s3_fifo, vulcan_frequency, vulcan_slru), not as a
+structural addition mutated into a simpler seed.
 
 Name the tier of your change (0/1/2) in the 1–2 sentence justification
 required by OUTPUT FORMAT below.
@@ -205,13 +207,16 @@ L. Do not invent new auxiliary data structures. Every list and every BPF
    BPF maps for extra bookkeeping (ghost maps, tombstone maps, secondary
    metadata maps, sketches), no new lists of any kind. Most seeds in this
    run have exactly one list (`main_list`) and one metadata map
-   (`folio_metadata_map`); `vulcan_s3_fifo` and `vulcan_frequency` are the
-   only seeds with more (`small_list` + `main_list` + `ghost_map`,
-   S3-FIFO-style admission) — that richer structure came from the seed,
-   not from a mutation. If an idea needs a structure the seed you're
-   mutating doesn't already have, it is out of scope for that seed. Take
-   the idea to a seed that already has the structure it needs instead of
-   adding the structure yourself.
+   (`folio_metadata_map`); three seeds have more:
+     - `vulcan_s3_fifo` / `vulcan_frequency` — `small_list` + `main_list` +
+       `ghost_map`, S3-FIFO-style lazy frequency-threshold admission.
+     - `vulcan_slru` — `probationary_list` + `protected_list`, no ghost
+       map; eager access-time promotion instead, plus a lazily-enforced
+       protected-segment size cap (demotion) done at eviction time.
+   That richer structure came from the seed, not from a mutation. If an
+   idea needs a structure the seed you're mutating doesn't already have,
+   it is out of scope for that seed. Take the idea to a seed that already
+   has the structure it needs instead of adding the structure yourself.
 
 ============================================================================
 POLICY METRICS — FEEDBACK CONVENTION (zero per-access overhead)
