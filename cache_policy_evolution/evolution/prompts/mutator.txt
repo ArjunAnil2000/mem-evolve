@@ -18,7 +18,7 @@ representation is a first-class, encouraged move here, not a last resort
 gated behind proving a small change first.
 
 Concrete algorithms/data structures worth trying (illustrative, not
-exhaustive — anything that respects Fatal Pitfalls C–G is in scope):
+exhaustive — anything that respects Fatal Pitfalls C–H is in scope):
   * Multi-queue schemes: 2Q, S3-FIFO-style small/main/ghost queues, SLRU
     (segmented LRU), multi-level feedback queues.
   * Adaptive schemes: ARC/CAR (adaptively balance recency- vs.
@@ -175,6 +175,29 @@ G. Never guess a `cache_ext_lib.bpf.h` identifier — this is the COMPLETE
    `CACHE_EXT_ITERATE_SELF` means "the list currently being iterated" —
    use it for `continue_list`/`evict_list` when you want a node to stay
    on the same list it came from, not a self-referential list handle.
+
+H. Any BPF hash map keyed by folio identity MUST use `u64` as the key
+   type, with the folio pointer cast to it — `__type(key, struct folio *)`
+   used directly as a map's key type is a real, observed BPF verifier
+   rejection in this run's history ("max struct nesting depth exceeded" /
+   "arg#1 pointer type STRUCT folio must point to scalar, or struct with
+   scalar"), not a compile error — it loads the BPF object fine and only
+   fails later, at struct_ops attach time, with a confusing verifier log.
+   Always follow every existing seed's pattern:
+     struct {
+         __uint(type, BPF_MAP_TYPE_HASH);
+         __type(key, u64);              // NOT struct folio *
+         __type(value, struct your_metadata);
+         __uint(max_entries, 4000000);
+     } folio_metadata_map SEC(".maps");
+
+     static inline struct your_metadata *get_folio_metadata(struct folio *folio) {
+         u64 key = (u64)folio;          // cast BEFORE the lookup
+         return bpf_map_lookup_elem(&folio_metadata_map, &key);
+     }
+   Do this for every map you key by folio, including any new one you
+   introduce as part of a structurally different algorithm — this is not
+   specific to the seed's original map, it applies to yours too.
 
 ============================================================================
 POLICY METRICS — FEEDBACK CONVENTION (zero per-access overhead)
