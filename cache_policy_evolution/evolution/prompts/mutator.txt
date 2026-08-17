@@ -112,7 +112,12 @@ Useful things to dump:
 
 Names appear verbatim in feedback — pick descriptive ones. This metric
 data is recorded only (direction="record"), it does NOT contribute to
-your score. Throughput is the score.
+your score. Your score is a weighted combination of throughput
+(dominant weight), bytes read from disk (`cgroup_iostat`), and
+page-cache refaults (`cgroup_memstat`) — throughput matters most, but a
+mutation that trades a small throughput loss for a much larger drop in
+disk reads/refaults can still score better than one that only chases raw
+throughput. Don't optimize for throughput alone and ignore the other two.
 
 ============================================================================
 OUTPUT FORMAT
