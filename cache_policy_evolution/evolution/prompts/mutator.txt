@@ -179,6 +179,24 @@ J. NEVER use `/` or `%` directly on a signed 64-bit value (`s64`) — this
    Do not "just try `/` and see if it compiles" — it will not, every
    time, for every signed division, regardless of the divisor.
 
+K. Per-folio interval state has exactly two fields, not four:
+   `struct vulcan_folio_metadata` only embeds `interval_minmax` (`struct
+   vulcan_minmax`) and `interval_ewma` (`struct vulcan_ewma`) — there is
+   no `interval_avg` or `interval_rw`/`interval_window` field on it, even
+   though `VULCAN_LISTENER_AVG`/`VULCAN_LISTENER_RW` are valid
+   `listener_mask` bits. Average and RollingWindow state live ONLY in the
+   global- and class-tier maps, never inline on the per-folio struct —
+   read them back with `vulcan_get_avg(feature_id)` /
+   `vulcan_get_class_avg(class_id, feature_id)` /
+   `vulcan_get_window_avg(feature_id)` / `vulcan_get_window_count(feature_id)`
+   / `vulcan_get_class_window_avg(class_id, feature_id)` /
+   `vulcan_get_class_window_count(class_id, feature_id)`, not a struct
+   field. If you turn on `VULCAN_LISTENER_AVG` for a per-folio feature, do
+   NOT invent a `data->vulcan.interval_avg` (or similar) field to read it
+   back — that identifier does not exist and fails with `no member named
+   'interval_avg' in 'struct vulcan_folio_metadata'`, this run's second
+   most common compile failure after Pitfall I's handler-name typos.
+
 ============================================================================
 POLICY METRICS — FEEDBACK CONVENTION (zero per-access overhead)
 ============================================================================
