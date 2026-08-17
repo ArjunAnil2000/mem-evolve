@@ -18,7 +18,7 @@ representation is a first-class, encouraged move here, not a last resort
 gated behind proving a small change first.
 
 Concrete algorithms/data structures worth trying (illustrative, not
-exhaustive — anything that respects Fatal Pitfalls C–F is in scope):
+exhaustive — anything that respects Fatal Pitfalls C–G is in scope):
   * Multi-queue schemes: 2Q, S3-FIFO-style small/main/ghost queues, SLRU
     (segmented LRU), multi-level feedback queues.
   * Adaptive schemes: ARC/CAR (adaptively balance recency- vs.
@@ -102,6 +102,79 @@ F. BPF globals the loader reads via `skel->bss->NAME` MUST be declared as
    `const`, (2) increment it from at least one struct_ops handler, and
    (3) read it in the loader as `skel->bss->NAME`. Forgetting any of
    these three steps breaks the build or the counter read.
+
+G. Never guess a `cache_ext_lib.bpf.h` identifier — this is the COMPLETE
+   list, nothing else exists. Guessing a plausible-looking variant (e.g.
+   inventing a "find which list this folio is in" lookup, because it
+   sounds like it should exist) is a real, repeated cause of compile
+   failures in this run — the compiler only warns
+   ("implicit declaration of function ... invalid in C99"), it does NOT
+   error at that point, and the resulting silent int-to-pointer coercion
+   produces confusing follow-on errors instead of a clear "unknown
+   function" message. Treat any `bpf_cache_ext_*` symbol not on this list
+   as nonexistent, full stop:
+
+   List kfuncs (exactly these eight, no others — there is NO
+   `bpf_cache_ext_list_find`, NO `bpf_cache_ext_list_del_from`, NO
+   generic "get the list a folio is on" lookup of any name):
+     u64  bpf_cache_ext_ds_registry_new_list(struct mem_cgroup *memcg);
+     int  bpf_cache_ext_list_add(u64 list, struct folio *folio);
+     int  bpf_cache_ext_list_add_tail(u64 list, struct folio *folio);
+     int  bpf_cache_ext_list_del(struct folio *folio);
+     int  bpf_cache_ext_list_move(u64 list, struct folio *folio, bool tail);
+     int  bpf_cache_ext_list_iterate(struct mem_cgroup *memcg, u64 list,
+              int(iter_fn)(int idx, struct cache_ext_list_node *node),
+              struct cache_ext_eviction_ctx *ctx);
+     int  bpf_cache_ext_list_iterate_extended(struct mem_cgroup *memcg,
+              u64 list, int(iter_fn)(int idx, struct cache_ext_list_node *node),
+              struct cache_ext_iterate_opts *opts,
+              struct cache_ext_eviction_ctx *ctx);
+     int  bpf_cache_ext_list_sample(struct mem_cgroup *memcg, u64 list,
+              s64(score_fn)(struct cache_ext_list_node *a),
+              struct sampling_options *opts,
+              struct cache_ext_eviction_ctx *ctx);
+   `bpf_cache_ext_list_move` IS how you relocate a folio from one list to
+   another (or reorder it within its current list) — use that for
+   promotion/demotion, not a made-up "move if already present" variant.
+
+   `struct cache_ext_list_node` (passed to your iterate callback) has
+   EXACTLY two fields — `folio` and the internal `node` list_head, nothing
+   else:
+     struct cache_ext_list_node { struct folio *folio; struct list_head node; };
+   There is NO `list_id`, `list`, or similar membership field on it —
+   `node->list_id` (or any variant) is a compile error ("no member named
+   ..."). If your policy needs to know which of ITS OWN lists a folio
+   currently belongs to (e.g. "is this folio in probationary or
+   protected?"), you must track that yourself as a field in your own
+   per-folio metadata map (a bool or small enum you set on insert/promote/
+   demote and check on lookup) — see vulcan_slru.c / vulcan_s3_fifo.c's
+   `in_protected`/`in_main` field for the established pattern, even though
+   those seeds are vulcan_bpf-based, the list-tracking idiom is identical.
+
+   Callback return codes (exactly three, used by both list_iterate and
+   list_iterate_extended):
+     CACHE_EXT_CONTINUE_ITER  -- keep going; in list_iterate_extended,
+                                  relocates the node to opts.continue_list
+     CACHE_EXT_STOP_ITER      -- end the pass cleanly right now
+     CACHE_EXT_EVICT_NODE     -- mark this folio for eviction; in
+                                  list_iterate_extended, relocates the
+                                  node to opts.evict_list first
+   Any other return value is an error path in the kernel ("Unknown
+   iterate return code") — do not return a raw int/bool, use these names.
+
+   `struct cache_ext_iterate_opts` (only used with list_iterate_extended,
+   exactly these six fields):
+     struct cache_ext_iterate_opts {
+         u64 continue_list;   // list id, or CACHE_EXT_ITERATE_SELF (0)
+         u64 continue_mode;   // CACHE_EXT_ITERATE_HEAD or _TAIL
+         u64 evict_list;      // list id, or CACHE_EXT_ITERATE_SELF (0)
+         u64 evict_mode;      // CACHE_EXT_ITERATE_HEAD or _TAIL
+         u64 nr_folios_continue;  // output: how many nodes continued
+         u64 nr_folios_evict;     // output: how many nodes evicted
+     };
+   `CACHE_EXT_ITERATE_SELF` means "the list currently being iterated" —
+   use it for `continue_list`/`evict_list` when you want a node to stay
+   on the same list it came from, not a self-referential list handle.
 
 ============================================================================
 POLICY METRICS — FEEDBACK CONVENTION (zero per-access overhead)
