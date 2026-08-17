@@ -103,11 +103,24 @@ F. BPF globals the loader reads via `skel->bss->NAME` MUST be declared as
    (3) read it in the loader as `skel->bss->NAME`. Forgetting any of
    these three steps breaks the build or the counter read.
 
-G. Never guess a `cache_ext_lib.bpf.h` identifier — this is the COMPLETE
-   list, nothing else exists. Guessing a plausible-looking variant (e.g.
-   inventing a "find which list this folio is in" lookup, because it
-   sounds like it should exist) is a real, repeated cause of compile
-   failures in this run — the compiler only warns
+G. Never guess an identifier name — these are the COMPLETE lists, nothing
+   else exists. Guessing a plausible-looking variant is a real, repeated
+   cause of compile failures in this run's history.
+
+   struct_ops handler function names (all five, exactly, do NOT drop
+   `folio_` from the access/evict/added handlers — this is the single
+   most common mistake, and it fails with a plain "use of undeclared
+   identifier" that's easy to misdiagnose as something else):
+     evo_policy_init
+     evo_policy_evict_folios
+     evo_policy_folio_accessed   -- NOT evo_policy_accessed
+     evo_policy_folio_evicted    -- NOT evo_policy_evicted
+     evo_policy_folio_added      -- NOT evo_policy_added
+
+   `cache_ext_lib.bpf.h` identifiers (the rest of this pitfall) — guessing
+   a plausible variant here (e.g. inventing a "find which list this folio
+   is in" lookup, because it sounds like it should exist) is the other
+   major repeated cause of compile failures — the compiler only warns
    ("implicit declaration of function ... invalid in C99"), it does NOT
    error at that point, and the resulting silent int-to-pointer coercion
    produces confusing follow-on errors instead of a clear "unknown
