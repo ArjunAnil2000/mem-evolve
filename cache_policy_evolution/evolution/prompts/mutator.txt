@@ -218,6 +218,24 @@ L. Do not invent new auxiliary data structures. Every list and every BPF
    it is out of scope for that seed. Take the idea to a seed that already
    has the structure it needs instead of adding the structure yourself.
 
+M. A C label (`name:`) must be immediately followed by a STATEMENT, never
+   a variable declaration — this is a general C-language rule, not a BPF
+   quirk, and it is a real, observed compile failure in this run
+   ("error: expected expression") from code shaped like:
+     cleanup:
+         u64 key = (u64)folio;   // INVALID — declaration right after a label
+   If you use a `goto`/label pattern (e.g. a shared cleanup path from
+   multiple early-return branches), put an empty statement or a
+   non-declaration statement between the label and any variable
+   declaration, or simply don't declare new variables at the label site —
+   compute the value earlier and just use it:
+     cleanup:
+         ;                        // empty statement — now a declaration is legal
+         u64 key = (u64)folio;
+   or restructure to avoid the label entirely if the function doesn't
+   already use one — most seeds in this run just use early `return;`
+   without any shared cleanup label, which sidesteps this rule completely.
+
 ============================================================================
 POLICY METRICS — FEEDBACK CONVENTION (zero per-access overhead)
 ============================================================================
@@ -284,11 +302,13 @@ choose which listeners observe them and how you use the readback.
 Per-folio (embedded in your own folio-keyed map value, e.g.
 `struct folio_metadata { struct vulcan_folio_metadata vulcan; };`):
 
-  vulcan_folio_init(now, size_pages, is_anonymous, class_id, client_tag)
+  vulcan_folio_init(now, size_pages, is_anonymous, client_tag)
                                                        -- construct, in folio_added.
-    class_id is inert in this run — there is no class-level feature store
-    built; pass 0 and never branch on it. It exists in the struct only
-    because it's part of core vulcan_bpf.h.
+    Exactly four arguments — there is NO class_id parameter in this run's
+    vulcan_bpf build (that only exists in the class-tier experiment's
+    variant of the library). Passing a 5th argument is a real, observed
+    compile error ("too many arguments to function call, expected 4, have
+    5"). `struct vulcan_folio_metadata` likewise has no class_id field.
   vulcan_folio_on_access(&meta->vulcan, now, refcount, mapcount, &cfg)
                                                        -- call once per
                                                           folio_accessed
@@ -453,11 +473,10 @@ experiment, so anything with `class` in the name (`vulcan_get_class_*`,
   map value struct — see the "Per-folio" section above for field-by-field
   usage of everything inside it):
     struct vulcan_folio_metadata vulcan_folio_init(u64 now, u32 size_pages,
-        u8 is_anonymous, u32 class_id, u32 client_tag);
-      -- class_id param exists in the signature (core vulcan_bpf.h is
-         shared with the class-tier experiment) but is INERT in this run
-         — always pass 0, never read it back, there is no class store to
-         look it up in.
+        u8 is_anonymous, u32 client_tag);
+      -- exactly FOUR arguments. This run's vulcan_bpf build has no
+         class_id parameter at all (that only exists in the class-tier
+         experiment's separate build of the library) — do not add one.
     void vulcan_folio_on_access(struct vulcan_folio_metadata *meta, u64 now,
         s32 refcount, s32 mapcount, const struct vulcan_folio_config *cfg);
     void vulcan_folio_on_evict(struct vulcan_folio_metadata *meta);
