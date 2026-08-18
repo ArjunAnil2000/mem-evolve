@@ -233,6 +233,25 @@ L. Do not invent new auxiliary data structures. Every list and every BPF
    not add a class-tier ghost/tombstone structure that the seed doesn't
    already maintain.)
 
+M. A C label (`name:`) must be immediately followed by a STATEMENT, never
+   a variable declaration — this is a general C-language rule, not a BPF
+   quirk, and it is a real, observed compile failure in this project's
+   sibling experiments ("error: expected expression") from code shaped
+   like:
+     cleanup:
+         u64 key = (u64)folio;   // INVALID — declaration right after a label
+   If you use a `goto`/label pattern (e.g. a shared cleanup path from
+   multiple early-return branches), put an empty statement or a
+   non-declaration statement between the label and any variable
+   declaration, or simply don't declare new variables at the label site —
+   compute the value earlier and just use it:
+     cleanup:
+         ;                        // empty statement — now a declaration is legal
+         u64 key = (u64)folio;
+   or restructure to avoid the label entirely if the function doesn't
+   already use one — most seeds in this run just use early `return;`
+   without any shared cleanup label, which sidesteps this rule completely.
+
 ============================================================================
 POLICY METRICS — FEEDBACK CONVENTION (zero per-access overhead)
 ============================================================================
