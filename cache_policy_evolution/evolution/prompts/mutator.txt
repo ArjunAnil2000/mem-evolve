@@ -103,6 +103,14 @@ F. BPF globals the loader reads via `skel->bss->NAME` MUST be declared as
    (3) read it in the loader as `skel->bss->NAME`. Forgetting any of
    these three steps breaks the build or the counter read.
 
+   Any global the loader can see (non-static, in .bss/.data/.rodata) MUST
+   use a UAPI type — `__u64`, `__s64`, `__u32`, `__s32` — never the
+   kernel-only `u64`/`s64`/`u32`/`s32`. bpftool copies the declared type
+   into evo_policy.skel.h, which is compiled as USERSPACE code where
+   `s64` does not exist ("unknown type name 's64'"). This includes making
+   an existing `static s64 x` visible by dropping `static`: change it to
+   `__s64 x` at the same time.
+
 G. Never guess an identifier name — these are the COMPLETE lists, nothing
    else exists. Guessing a plausible-looking variant is a real, repeated
    cause of compile failures in this run's history.
