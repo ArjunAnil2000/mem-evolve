@@ -2,8 +2,9 @@
 // SECTION: BPF KERNEL CODE
 // ============================================================================
 // EVOLVE-BLOCK-START
-// MRU: move-to-head on access, evict from head (most-recently-used
-// evicted first) — adversarial baseline, not meant to score well.
+// MRU: a single list. Added and accessed folios move to the head, and eviction walks from
+// the head, so the MOST recently used folio is evicted first. Suited to cyclic/sequential
+// scans larger than the cache; poor for skewed reuse.
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
@@ -14,62 +15,108 @@
 
 char _license[] SEC("license") = "GPL";
 
-static u64 main_list;
 
-static inline bool is_folio_relevant(struct folio *folio) {
-	if (!folio || !folio->mapping || !folio->mapping->host)
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
+
+// #define DEBUG
+#ifdef DEBUG
+#define dbg_printk(fmt, ...) bpf_printk(fmt, ##__VA_ARGS__)
+#else
+#define dbg_printk(fmt, ...)
+#endif
+
+
+inline bool is_folio_relevant(struct folio *folio)
+{
+	if (!folio) {
 		return false;
-	return inode_in_watchlist(folio->mapping->host->i_ino);
+	}
+	if (folio->mapping == NULL) {
+		return false;
+	}
+	if (folio->mapping->host == NULL) {
+		return false;
+	}
+	bool res = inode_in_watchlist(folio->mapping->host->i_ino);
+	return res;
 }
+
+__u64 mru_list;
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(evo_policy_init, struct mem_cgroup *memcg)
 {
-	main_list = bpf_cache_ext_ds_registry_new_list(memcg);
-	if (main_list == 0) {
-		bpf_printk("evo_policy: init: Failed to create main_list\n");
+	dbg_printk("cache_ext: Hi from the evo_policy_init hook! :D\n");
+	mru_list = bpf_cache_ext_ds_registry_new_list(memcg);
+	if (mru_list == 0) {
+		bpf_printk("cache_ext: Failed to create mru_list\n");
 		return -1;
 	}
+	bpf_printk("cache_ext: Created mru_list: %llu\n", mru_list);
 	return 0;
 }
 
-static int evict_cb(int idx, struct cache_ext_list_node *a)
+void BPF_STRUCT_OPS(evo_policy_folio_added, struct folio *folio)
 {
-	if ((idx < 200) && (!folio_test_uptodate(a->folio) || !folio_test_lru(a->folio)))
-		return CACHE_EXT_CONTINUE_ITER;
+	dbg_printk("cache_ext: Hi from the evo_policy_folio_added hook! :D\n");
+	if (!is_folio_relevant(folio)) {
+		return;
+	}
 
+	int ret = bpf_cache_ext_list_add(mru_list, folio);
+	if (ret != 0) {
+		bpf_printk("cache_ext: Failed to add folio to mru_list\n");
+		return;
+	}
+	dbg_printk("cache_ext: Added folio to mru_list\n");
+}
+
+void BPF_STRUCT_OPS(evo_policy_folio_accessed, struct folio *folio)
+{
+	int ret;
+	dbg_printk("cache_ext: Hi from the evo_policy_folio_accessed hook! :D\n");
+
+	if (!is_folio_relevant(folio)) {
+		return;
+	}
+
+	ret = bpf_cache_ext_list_move(mru_list, folio, false);
+	if (ret != 0) {
+		bpf_printk("cache_ext: Failed to move folio to mru_list head\n");
+		return;
+	}
+
+	dbg_printk("cache_ext: Moved folio to mru_list tail\n");
+}
+
+void BPF_STRUCT_OPS(evo_policy_folio_evicted, struct folio *folio)
+{
+	dbg_printk("cache_ext: Hi from the evo_policy_folio_evicted hook! :D\n");
+	bpf_cache_ext_list_del(folio);
+}
+
+static int iterate_mru(int idx, struct cache_ext_list_node *node)
+{
+	if ((idx < 200) && (!folio_test_uptodate(node->folio) || !folio_test_lru(node->folio))) {
+		return CACHE_EXT_CONTINUE_ITER;
+	}
 	return CACHE_EXT_EVICT_NODE;
 }
 
 void BPF_STRUCT_OPS(evo_policy_evict_folios, struct cache_ext_eviction_ctx *eviction_ctx,
-		    struct mem_cgroup *memcg)
+	       struct mem_cgroup *memcg)
 {
-	/* Iterate from head — which holds the most-recently-used pages under MRU */
-	if (bpf_cache_ext_list_iterate(memcg, main_list, evict_cb, eviction_ctx) < 0) {
-		bpf_printk("evo_policy: evict: Failed to iterate main_list\n");
-		return;
+	dbg_printk("cache_ext: Hi from the evo_policy_evict_folios hook! :D\n");
+	int ret = bpf_cache_ext_list_iterate(memcg, mru_list, iterate_mru,
+					     eviction_ctx);
+	// Check that the right amount of folios were evicted
+	if (ret < 0) {
+		bpf_printk("cache_ext: Failed to evict folios\n");
 	}
-}
-
-void BPF_STRUCT_OPS(evo_policy_folio_accessed, struct folio *folio) {
-	if (!is_folio_relevant(folio))
-		return;
-
-	/* Move to head (most-recently-used position) */
-	bpf_cache_ext_list_move(main_list, folio, false);
-}
-
-void BPF_STRUCT_OPS(evo_policy_folio_evicted, struct folio *folio) {
-	bpf_cache_ext_list_del(folio);
-}
-
-void BPF_STRUCT_OPS(evo_policy_folio_added, struct folio *folio) {
-	if (!is_folio_relevant(folio))
-		return;
-
-	/* Add to head — new pages are the most recent.
-	 * If already in list (readahead re-add), move to head instead. */
-	if (bpf_cache_ext_list_add(main_list, folio))
-		bpf_cache_ext_list_move(main_list, folio, false);
+	if (eviction_ctx->request_nr_folios_to_evict > eviction_ctx->nr_folios_to_evict) {
+		bpf_printk("cache_ext: Didn't evict enough folios. Requested: %d, Evicted: %d\n",
+			   eviction_ctx->request_nr_folios_to_evict,
+			   eviction_ctx->nr_folios_to_evict);
+	}
 }
 
 SEC(".struct_ops.link")
@@ -85,162 +132,166 @@ struct cache_ext_ops evo_policy_ops = {
 // ============================================================================
 // SECTION: USERSPACE LOADER
 // ============================================================================
+// Loader for the MRU policy: parses -w/-s/-c like every policy in this repo,
+// attaches the struct_ops to the cgroup and waits for SIGINT/SIGTERM.
 // EVOLVE-BLOCK-START
 #include <argp.h>
-#include <bpf/bpf.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
-#include <stdint.h>
-#include <stdio.h>
 #include <signal.h>
-#include <stdlib.h>
 #include <string.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <bpf/bpf.h>
+#include <fcntl.h>
+#include <stdio.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
-#include "dir_watcher.h"
 #include "evo_policy.skel.h"
-#include "evo_dump.h"
+#include "dir_watcher.h"
+
+char *USAGE =
+	"Usage: ./evo_policy --watch_dir <dir> --cgroup_path <path>\n";
 
 struct cmdline_args {
 	char *watch_dir;
-	uint64_t cgroup_size;
 	char *cgroup_path;
+	uint64_t cgroup_size;	/* accepted for harness compatibility */
 };
 
-static struct argp_option options[] = {
-	{ "watch_dir", 'w', "DIR", 0, "Directory to watch" },
-	{ "cgroup_size", 's', "SIZE", 0, "Size of the cgroup in bytes" },
-	{ "cgroup_path", 'c', "PATH", 0, "Path to cgroup" },
-	{ 0 },
-};
-
-static volatile sig_atomic_t exiting;
-
-static void sig_handler(int signo) { exiting = 1; }
+static struct argp_option options[] = { { "watch_dir", 'w', "DIR", 0,
+					  "Directory to watch" },
+					{ "cgroup_path", 'c', "PATH", 0,
+					  "Path to cgroup (e.g., /sys/fs/cgroup/cache_ext_test)" },
+					{ "cgroup_size", 's', "SIZE", 0,
+	  "Size of the cgroup in bytes (accepted for harness compatibility)" },
+					{ 0 } };
 
 static error_t parse_opt(int key, char *arg, struct argp_state *state)
 {
 	struct cmdline_args *args = state->input;
 	switch (key) {
-	case 'w': args->watch_dir = arg; break;
+	case 'w':
+		args->watch_dir = arg;
+		break;
+	case 'c':
+		args->cgroup_path = arg;
+		break;
 	case 's':
 		errno = 0;
 		args->cgroup_size = strtoull(arg, NULL, 10);
-		if (errno) args->cgroup_size = 0;
+		if (errno)
+			args->cgroup_size = 0;
 		break;
-	case 'c': args->cgroup_path = arg; break;
-	default: return ARGP_ERR_UNKNOWN;
+	default:
+		return ARGP_ERR_UNKNOWN;
 	}
 	return 0;
 }
 
-static int parse_args(int argc, char **argv, struct cmdline_args *args) {
-	struct argp argp = { options, parse_opt, 0, 0 };
-	argp_parse(&argp, argc, argv, 0, 0, args);
+static volatile sig_atomic_t exiting;
 
-	if (!args->watch_dir) {
+static void sig_handler(int signo)
+{
+	exiting = 1;
+}
+
+int main(int argc, char **argv)
+{
+	int ret = 1;
+	struct evo_policy_bpf *skel = NULL;
+	struct bpf_link *link = NULL;
+	int cgroup_fd = -1;
+	libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
+
+	{
+		struct sigaction sa;
+		memset(&sa, 0, sizeof(sa));
+		sigemptyset(&sa.sa_mask);
+		sa.sa_handler = sig_handler;
+		if (sigaction(SIGINT, &sa, NULL) || sigaction(SIGTERM, &sa, NULL)) {
+			perror("Failed to set up signal handling");
+			return 1;
+		}
+	}
+
+	// Parse command line arguments
+	struct cmdline_args args = { 0 };
+	struct argp argp = { options, parse_opt, 0, 0 };
+	argp_parse(&argp, argc, argv, 0, 0, &args);
+
+	// Validate arguments
+	if (args.watch_dir == NULL) {
 		fprintf(stderr, "Missing required argument: watch_dir\n");
 		return 1;
 	}
-	if (args->cgroup_size == 0) {
-		fprintf(stderr, "Invalid cgroup size\n");
-		return 1;
-	}
-	if (!args->cgroup_path) {
+
+	if (args.cgroup_path == NULL) {
 		fprintf(stderr, "Missing required argument: cgroup_path\n");
 		return 1;
 	}
-	return 0;
-}
 
-static int validate_watch_dir(const char *watch_dir, char *watch_dir_full_path) {
-	if (access(watch_dir, F_OK) == -1) {
-		fprintf(stderr, "Directory does not exist: %s\n", watch_dir);
+	// Does watch_dir exist?
+	if (access(args.watch_dir, F_OK) == -1) {
+		fprintf(stderr, "Directory does not exist: %s\n",
+			args.watch_dir);
 		return 1;
 	}
-	if (realpath(watch_dir, watch_dir_full_path) == NULL) {
+
+	// Get full path of watch_dir
+	char watch_dir_full_path[PATH_MAX];
+	if (realpath(args.watch_dir, watch_dir_full_path) == NULL) {
 		perror("realpath");
 		return 1;
 	}
+
+	// TODO: Enable longer length
 	if (strlen(watch_dir_full_path) > 128) {
 		fprintf(stderr, "watch_dir path too long\n");
 		return 1;
 	}
-	return 0;
-}
 
-int main(int argc, char **argv) {
-	struct cmdline_args args = { 0 };
-	struct evo_policy_bpf *skel = NULL;
-	struct bpf_link *link = NULL;
-	struct sigaction sa;
-	char watch_dir_path[PATH_MAX];
-	int cgroup_fd = -1;
-	int ret = 1;
-
-	libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
-
-	if (parse_args(argc, argv, &args))
-		return 1;
-
-	memset(&sa, 0, sizeof(sa));
-	sigemptyset(&sa.sa_mask);
-	sa.sa_handler = sig_handler;
-
-	if (sigaction(SIGINT, &sa, NULL)) {
-		perror("Failed to set up signal handling");
-		return 1;
-	}
-
-	if (validate_watch_dir(args.watch_dir, watch_dir_path))
-		return 1;
-
+	// Open cgroup directory early
 	cgroup_fd = open(args.cgroup_path, O_RDONLY);
 	if (cgroup_fd < 0) {
 		perror("Failed to open cgroup path");
 		return 1;
 	}
 
+	// Open skel
 	skel = evo_policy_bpf__open();
-	if (!skel) {
+	if (skel == NULL) {
 		perror("Failed to open BPF skeleton");
 		goto cleanup;
 	}
 
-	watch_dir_path_len_map(skel) = strlen(watch_dir_path);
-	strcpy(watch_dir_path_map(skel), watch_dir_path);
-
-	if (evo_policy_bpf__load(skel)) {
+	// Load programs
+	ret = evo_policy_bpf__load(skel);
+	if (ret) {
 		perror("Failed to load BPF skeleton");
 		goto cleanup;
 	}
 
-	if (initialize_watch_dir_map(watch_dir_path, bpf_map__fd(inode_watchlist_map(skel)), true)) {
+	// Initialize watch_dir map
+	ret = initialize_watch_dir_map(watch_dir_full_path, bpf_map__fd(skel->maps.inode_watchlist), true);
+	if (ret) {
 		perror("Failed to initialize watch_dir map");
 		goto cleanup;
 	}
 
+	// Attach cache_ext_ops to the specific cgroup
 	link = bpf_map__attach_cache_ext_ops(skel->maps.evo_policy_ops, cgroup_fd);
-	if (!link) {
+	if (link == NULL) {
 		perror("Failed to attach cache_ext_ops to cgroup");
 		goto cleanup;
 	}
 
 	printf("evo_policy (MRU) running. Press Ctrl+C to exit...\n");
+	fflush(stdout);
 	while (!exiting)
 		sleep(1);
-
-	/* Surface state for next-round LLM feedback. Plain MRU has no
-	 * per-policy state worth tracking; we just stamp the policy name.
-	 * Mutations that add state should add evo_dump_u64() lines here. */
-	{
-		FILE *m = evo_metrics_open();
-		evo_dump_str(m, "policy_name", "mru");
-		evo_metrics_close(m);
-	}
 	ret = 0;
 
 cleanup:

@@ -1,0 +1,94 @@
+# Evolution config — mem-evolve vs. CORAL comparison on GET-SCAN/LevelDB.
+#
+# Matches the CORAL multi-host run (coral-runs/multihost-maximize-throughput,
+# 2026-10-26) as closely as mem-evolve allows: same get_scan benchmark, same
+# 180 s eval timeout, same 7 reference seeds (seeds/ = CORAL's
+# seed/reference/*.c + noop.c), score = absolute throughput (ops/s) with
+# nothing else scored, Opus 5.5 for every LLM role. Hosts are in
+# ../cloudlab-instances.md: pc258 is the coordinator (runs this + LiteLLM),
+# pc257/pc252/pc318 are workers. 27 rounds x 3 branches ~= CORAL's 80 evals
+# (frontier spawns can add more).
+#
+# Usage (on the coordinator):
+#   export LITELLM_MASTER_KEY=... EVO_WORKER_TOKEN=...
+#   python3.11 evolve.py get_scan_coral_comparison.toml --output-dir runs/get_scan-<N>
+
+source_dir    = "../cache_ext"
+benchmark     = "eval/get_scan/run_with_policy.sh"
+output_dir    = "runs/get_scan"
+seeds_dir     = "seeds"
+mutator_prompt = "evolution/prompts/mutator.txt"
+
+rounds     = 27
+timeout    = 180
+resume     = false
+tree_file  = "evolution_tree.json"
+
+# Absolute scoring needs no baseline stats. calibrate_baseline still keeps
+# noop out of the planner's seed choices.
+auto_calibrate     = false
+calibrate_baseline = "noop"
+
+workload_description = """
+GET-SCAN over LevelDB: a Zipfian-skewed keyspace (a small minority of hot
+keys account for most traffic) under a 95%/5% GET/SCAN mix. Exactly one
+worker thread issues large sequential range scans (500 keys/scan); the rest
+issue point GETs against the hot-skewed distribution. The scan thread is
+the adversary: big sequential scans evict the hot GET working set from the
+cache. The benchmark runs in a memory-limited cgroup, so eviction decisions
+matter.
+
+Primary goal: maximize total throughput (ops/sec). The score IS the measured
+throughput; reading fewer bytes from disk does NOT compensate for lower
+throughput. Secondary: lower READ p99 latency without starving SCAN
+throughput (a policy that merely delays scan-page eviction until they are
+the only thing left just postpones the problem).
+
+The harness creates and pins a ground-truth scan-thread classification map
+(scan_pids) before any policy is attached (see
+eval/get_scan/run_with_policy.sh). A policy that wants the signal attaches
+to that harness-owned map via bpf_obj_get()/bpf_map__reuse_fd() in its
+loader (the get_scan seed does this) rather than creating its own.
+"""
+
+workers = [
+    "http://pc257.emulab.net:8080",   # slave-0
+    "http://pc252.emulab.net:8080",   # slave-1
+    "http://pc318.emulab.net:8080",   # slave-2
+]
+
+[http_worker]
+cgroup = "/sys/fs/cgroup/cache_ext_evo_bench"
+# auth_token comes from $EVO_WORKER_TOKEN (not committed).
+
+[llm.mutator]
+model       = "claude-opus-5-5"
+provider    = "openai"
+api_base    = "http://localhost:4000/v1"
+api_key_env = "LITELLM_MASTER_KEY"
+temperature = 0.85
+
+[llm.planner]
+model       = "claude-opus-5-5"
+provider    = "openai"
+api_base    = "http://localhost:4000/v1"
+api_key_env = "LITELLM_MASTER_KEY"
+temperature = 0.5
+
+[[probes]]
+type         = "json_extract"
+name         = "throughput"
+results_file = "results.json"
+json_path    = "throughput_ops_per_sec"
+direction    = "maximize"
+unit         = "ops/s"
+
+[scoring]
+mode        = "absolute"     # score = raw value of score_probe; no z-scoring
+score_probe = "throughput"
+
+[evolution]
+checkpoint_interval     = 5
+top_k_for_checkpoint    = 10
+max_spawn               = 2
+checkpoint_temperature  = 0.5

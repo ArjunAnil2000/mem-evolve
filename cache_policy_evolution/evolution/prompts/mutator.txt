@@ -212,6 +212,10 @@ H. Any BPF hash map keyed by folio identity MUST use `u64` as the key
    introduce as part of a structurally different algorithm — this is not
    specific to the seed's original map, it applies to yours too.
 
+I. 64-bit division or modulo by a non-constant can fail to build in BPF.
+   Use unsigned values, and shifts/masks (power-of-two sizes) wherever
+   possible.
+
 ============================================================================
 POLICY METRICS — FEEDBACK CONVENTION (zero per-access overhead)
 ============================================================================
@@ -259,12 +263,12 @@ Useful things to dump:
 
 Names appear verbatim in feedback — pick descriptive ones. This metric
 data is recorded only (direction="record"), it does NOT contribute to
-your score. Your score is a weighted combination of throughput
-(dominant weight), bytes read from disk (`cgroup_iostat`), and
-page-cache refaults (`cgroup_memstat`) — throughput matters most, but a
-mutation that trades a small throughput loss for a much larger drop in
-disk reads/refaults can still score better than one that only chases raw
-throughput. Don't optimize for throughput alone and ignore the other two.
+your score. Your score is the measured benchmark throughput in ops/sec
+(the `throughput` probe), nothing else: higher is better. Bytes read from
+disk (`cgroup_iostat`), page-cache refaults (`cgroup_memstat`) and
+wallclock are shown as diagnostics only — reading fewer bytes does NOT
+compensate for lower throughput. Measurement noise is about ±2% between
+identical runs, so treat small differences as inconclusive.
 
 ============================================================================
 OUTPUT FORMAT

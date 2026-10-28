@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import shutil
 import threading
@@ -153,6 +154,30 @@ def _normalized_score(
         return {"score": 0.0, "components": {}, "skipped": []}
     probes = eval_dict.get("probes") or {}
     return norm.score(probes, weights)
+
+
+def _absolute_score(eval_dict: Dict[str, Any], score_probe: str) -> Dict[str, Any]:
+    """Score = the raw value of one probe (scoring.mode = "absolute").
+
+    Mirrors the CORAL multi-host grader: e.g. score = throughput in ops/s,
+    nothing else scored, no calibration. Returns the same dict shape as
+    `NormalizationState.score` plus `error`, which is set when the eval
+    succeeded but the score probe is missing or not a positive finite number
+    (the round is then treated as failed rather than scored 0).
+    """
+    if not eval_dict.get("ok"):
+        return {"score": 0.0, "components": {}, "skipped": [], "error": ""}
+    entry = (eval_dict.get("probes") or {}).get(score_probe)
+    try:
+        value = float(entry.get("value")) if isinstance(entry, dict) else float("nan")
+    except (TypeError, ValueError):
+        value = float("nan")
+    if not math.isfinite(value) or value <= 0.0:
+        return {
+            "score": 0.0, "components": {}, "skipped": [score_probe],
+            "error": f"score probe {score_probe!r} missing or invalid: {entry!r}",
+        }
+    return {"score": value, "components": {}, "skipped": [], "error": ""}
 
 
 def calibrate(cfg: Dict[str, Any], n_runs: int) -> Dict[str, Dict[str, Any]]:
@@ -404,6 +429,14 @@ def evolve(cfg: Dict[str, Any]) -> None:
     # so scores stay comparable across rounds. Set update_during_evolution=true
     # to restore the original "running stats" behavior.
     update_during_evolution = bool(scoring_cfg.get("update_during_evolution", False))
+    # "absolute": score = raw value of `score_probe` (e.g. throughput ops/s),
+    # no z-scoring; "zscore" (default): weighted tanh(z) as described above.
+    scoring_mode = scoring_cfg.get("mode", "zscore")
+    score_probe = scoring_cfg.get("score_probe", "throughput")
+    if scoring_mode not in ("zscore", "absolute"):
+        raise ValueError(f"scoring.mode must be 'zscore' or 'absolute', got {scoring_mode!r}")
+    log.info("Scoring mode: %s%s", scoring_mode,
+             f" (score = {score_probe})" if scoring_mode == "absolute" else "")
     log.info(
         "Normalization: squash=%s min_n=%d weights=%s pre-loaded probes=%d "
         "update_during_evolution=%s",
@@ -552,7 +585,12 @@ def evolve(cfg: Dict[str, Any]) -> None:
 
         artifacts = []
         for res in results:
-            scored = _normalized_score(scoring_state, res.details, weights)
+            if scoring_mode == "absolute":
+                scored = _absolute_score(res.details or {}, score_probe)
+                if scored["error"] and not res.error:
+                    res.error = scored["error"]
+            else:
+                scored = _normalized_score(scoring_state, res.details, weights)
             normalized_score = float(scored["score"])
             # Replace the raw EvaluationResult.score with the normalized one
             # and stash the breakdown for LLM/UI consumption.
@@ -563,6 +601,8 @@ def evolve(cfg: Dict[str, Any]) -> None:
                     "components": scored["components"],
                     "skipped": scored["skipped"],
                     "squash": scoring_state.squash,
+                    "mode": scoring_mode,
+                    "score_probe": score_probe if scoring_mode == "absolute" else None,
                 }
 
             # Update running stats from this result's raw probe values, but

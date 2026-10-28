@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import asdict
 from typing import Any, Dict, Optional
 
@@ -327,7 +328,8 @@ def build_workers(cfg: Dict[str, Any]) -> list[Worker]:
         )]
 
     http_defaults = cfg.get("http_worker", {}) or {}
-    default_token = http_defaults.get("auth_token") or cfg.get("auth_token")
+    default_token = (http_defaults.get("auth_token") or cfg.get("auth_token")
+                     or os.environ.get("EVO_WORKER_TOKEN"))  # same env var as worker_server.py
     default_cgroup = http_defaults.get("cgroup") or cfg.get("cgroup")
     default_cwd = http_defaults.get("cwd") or http_defaults.get("remote_cwd")
 

@@ -2,7 +2,9 @@
 // SECTION: BPF KERNEL CODE
 // ============================================================================
 // EVOLVE-BLOCK-START
-// Plain FIFO: insertion-order list, evict from head, no access tracking.
+// FIFO: a single list. New folios are appended at the tail and eviction walks from the
+// head, so the oldest-inserted folio goes first. Accesses are ignored entirely (no
+// folio_accessed hook).
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
@@ -18,6 +20,7 @@ static u64 main_list;
 static inline bool is_folio_relevant(struct folio *folio) {
 	if (!folio || !folio->mapping || !folio->mapping->host)
 		return false;
+
 	return inode_in_watchlist(folio->mapping->host->i_ino);
 }
 
@@ -25,13 +28,15 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(evo_policy_init, struct mem_cgroup *memcg)
 {
 	main_list = bpf_cache_ext_ds_registry_new_list(memcg);
 	if (main_list == 0) {
-		bpf_printk("evo_policy: init: Failed to create main_list\n");
+		bpf_printk("cache_ext: init: Failed to create main_list\n");
 		return -1;
 	}
+	bpf_printk("cache_ext: Created main_list: %llu\n", main_list);
+
 	return 0;
 }
 
-static int evict_cb(int idx, struct cache_ext_list_node *a)
+static int bpf_fifo_evict_cb(int idx, struct cache_ext_list_node *a)
 {
 	if (!folio_test_uptodate(a->folio) || !folio_test_lru(a->folio))
 		return CACHE_EXT_CONTINUE_ITER;
@@ -45,14 +50,17 @@ static int evict_cb(int idx, struct cache_ext_list_node *a)
 void BPF_STRUCT_OPS(evo_policy_evict_folios, struct cache_ext_eviction_ctx *eviction_ctx,
 		    struct mem_cgroup *memcg)
 {
-	if (bpf_cache_ext_list_iterate(memcg, main_list, evict_cb, eviction_ctx) < 0) {
-		bpf_printk("evo_policy: evict: Failed to iterate main_list\n");
+	if (bpf_cache_ext_list_iterate(memcg, main_list, bpf_fifo_evict_cb, eviction_ctx) < 0) {
+		bpf_printk("cache_ext: evict: Failed to iterate main_list\n");
 		return;
 	}
 }
 
 void BPF_STRUCT_OPS(evo_policy_folio_evicted, struct folio *folio) {
-	// Simple FIFO doesn't track evicted folios
+	// if (bpf_cache_ext_list_del(folio)) {
+	// 	bpf_printk("cache_ext: Failed to delete folio from list\n");
+	// 	return;
+	// }
 }
 
 void BPF_STRUCT_OPS(evo_policy_folio_added, struct folio *folio) {
@@ -60,7 +68,7 @@ void BPF_STRUCT_OPS(evo_policy_folio_added, struct folio *folio) {
 		return;
 
 	if (bpf_cache_ext_list_add_tail(main_list, folio)) {
-		bpf_printk("evo_policy: added: Failed to add folio to main_list\n");
+		bpf_printk("cache_ext: added: Failed to add folio to main_list\n");
 		return;
 	}
 }
@@ -77,54 +85,65 @@ struct cache_ext_ops evo_policy_ops = {
 // ============================================================================
 // SECTION: USERSPACE LOADER
 // ============================================================================
+// Loader for the FIFO policy: parses -w/-s/-c like every policy in this repo,
+// attaches the struct_ops to the cgroup and waits for SIGINT/SIGTERM.
 // EVOLVE-BLOCK-START
 #include <argp.h>
-#include <bpf/bpf.h>
 #include <errno.h>
+#include <string.h>
+#include <stdlib.h>
+#include <bpf/bpf.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <signal.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 #include "dir_watcher.h"
 #include "evo_policy.skel.h"
-#include "evo_dump.h"
 
+char *USAGE = "Usage: ./evo_policy --watch_dir <dir> --cgroup_path <path>\n";
 struct cmdline_args {
 	char *watch_dir;
-	uint64_t cgroup_size;
 	char *cgroup_path;
+	uint64_t cgroup_size;	/* accepted for harness compatibility */
 };
 
 static struct argp_option options[] = {
 	{ "watch_dir", 'w', "DIR", 0, "Directory to watch" },
-	{ "cgroup_size", 's', "SIZE", 0, "Size of the cgroup in bytes" },
-	{ "cgroup_path", 'c', "PATH", 0, "Path to cgroup" },
-	{ 0 },
+	{ "cgroup_path", 'c', "PATH", 0, "Path to cgroup (e.g., /sys/fs/cgroup/cache_ext_test)" },
+	{ "cgroup_size", 's', "SIZE", 0,
+	  "Size of the cgroup in bytes (accepted for harness compatibility)" },
+					{ 0 },
 };
 
 static volatile sig_atomic_t exiting;
 
-static void sig_handler(int signo) { exiting = 1; }
+static void sig_handler(int signo) {
+	exiting = 1;
+}
 
 static error_t parse_opt(int key, char *arg, struct argp_state *state)
 {
 	struct cmdline_args *args = state->input;
 	switch (key) {
-	case 'w': args->watch_dir = arg; break;
+	case 'w':
+		args->watch_dir = arg;
+		break;
+	case 'c':
+		args->cgroup_path = arg;
+		break;
 	case 's':
 		errno = 0;
 		args->cgroup_size = strtoull(arg, NULL, 10);
-		if (errno) args->cgroup_size = 0;
+		if (errno)
+			args->cgroup_size = 0;
 		break;
-	case 'c': args->cgroup_path = arg; break;
-	default: return ARGP_ERR_UNKNOWN;
+	default:
+		return ARGP_ERR_UNKNOWN;
 	}
 	return 0;
 }
@@ -133,34 +152,43 @@ static int parse_args(int argc, char **argv, struct cmdline_args *args) {
 	struct argp argp = { options, parse_opt, 0, 0 };
 	argp_parse(&argp, argc, argv, 0, 0, args);
 
-	if (!args->watch_dir) {
+	if (args->watch_dir == NULL) {
 		fprintf(stderr, "Missing required argument: watch_dir\n");
 		return 1;
 	}
-	if (args->cgroup_size == 0) {
-		fprintf(stderr, "Invalid cgroup size\n");
-		return 1;
-	}
-	if (!args->cgroup_path) {
+
+	if (args->cgroup_path == NULL) {
 		fprintf(stderr, "Missing required argument: cgroup_path\n");
 		return 1;
 	}
+
 	return 0;
 }
 
+/*
+ * Validate watch_dir
+ *
+ * watch_dir_full_path must be able to hold PATH_MAX bytes.
+ */
 static int validate_watch_dir(const char *watch_dir, char *watch_dir_full_path) {
+	// Does watch_dir exist?
 	if (access(watch_dir, F_OK) == -1) {
 		fprintf(stderr, "Directory does not exist: %s\n", watch_dir);
 		return 1;
 	}
+
+	// Get full path of watch_dir
 	if (realpath(watch_dir, watch_dir_full_path) == NULL) {
 		perror("realpath");
 		return 1;
 	}
+
+	// BPF policy restriction
 	if (strlen(watch_dir_full_path) > 128) {
 		fprintf(stderr, "watch_dir path too long\n");
 		return 1;
 	}
+
 	return 0;
 }
 
@@ -182,7 +210,8 @@ int main(int argc, char **argv) {
 	sigemptyset(&sa.sa_mask);
 	sa.sa_handler = sig_handler;
 
-	if (sigaction(SIGINT, &sa, NULL)) {
+	// Install signal handler
+	if (sigaction(SIGINT, &sa, NULL) || sigaction(SIGTERM, &sa, NULL)) {
 		perror("Failed to set up signal handling");
 		return 1;
 	}
@@ -216,29 +245,21 @@ int main(int argc, char **argv) {
 	}
 
 	link = bpf_map__attach_cache_ext_ops(skel->maps.evo_policy_ops, cgroup_fd);
-	if (!link) {
+	if (link == NULL) {
 		perror("Failed to attach cache_ext_ops to cgroup");
 		goto cleanup;
 	}
 
+	// This is necessary for the dir_watcher functionality
 	if (evo_policy_bpf__attach(skel)) {
 		perror("Failed to attach BPF skeleton");
 		goto cleanup;
 	}
 
 	printf("evo_policy (FIFO) running. Press Ctrl+C to exit...\n");
+	fflush(stdout);
 	while (!exiting)
 		sleep(1);
-
-	/* Surface state for next-round LLM feedback. Plain FIFO has no
-	 * per-policy state worth tracking; we just stamp the policy name.
-	 * Mutations that add state (queue sizes, BPF globals you bumped
-	 * from struct_ops handlers) should add evo_dump_u64() lines here. */
-	{
-		FILE *m = evo_metrics_open();
-		evo_dump_str(m, "policy_name", "fifo");
-		evo_metrics_close(m);
-	}
 	ret = 0;
 
 cleanup:

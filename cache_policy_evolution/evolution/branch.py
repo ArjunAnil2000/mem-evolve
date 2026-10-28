@@ -169,7 +169,14 @@ def _followup_user_msg(round_num: int, parent_node: TreeNode) -> str:
     # this run was statistically better or worse than the running mean.
     probes = _extract_probe_summaries(parent_node.details)
     components = _extract_norm_components(parent_node.details)
-    if probes:
+    norm = parent_node.details.get("normalized") if isinstance(parent_node.details, dict) else None
+    if probes and isinstance(norm, dict) and norm.get("mode") == "absolute":
+        parts.append(f"Probes (raw values; only `{norm.get('score_probe')}` is scored, "
+                     "the rest are diagnostics):")
+        for name, summary in probes.items():
+            parts.append(f"  - {name}: {summary}")
+        parts.append(f"score={parent_node.score:.1f} (= {norm.get('score_probe')}, higher is better)")
+    elif probes:
         parts.append("Probes (raw value | z-score vs running mean, "
                      "negative = better for minimize-direction probes):")
         for name, summary in probes.items():
